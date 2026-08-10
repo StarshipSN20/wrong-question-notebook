@@ -1,0 +1,14 @@
+{
+  "name": "wrong-question-notebook",
+  "version": "0.1.0",
+  "description": "数理化错题本 - 阶段一骨架 (Electron + FastAPI + SQLite)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.2.1"
+  }
+}

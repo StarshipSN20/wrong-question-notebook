@@ -1,0 +1,16 @@
+/* Tailwind 之外的少量自定义样式 */
+
+/* 导航项选中态 */
+.nav-item.active {
+  background-color: #1e293b; /* slate-800 */
+  border-left: 3px solid #3b82f6; /* blue-500 */
+  font-weight: 600;
+}
+
+/* 卡片正文多行截断（Tailwind line-clamp 的兜底实现） */
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>数理化错题本</title>
+  <!-- Tailwind CSS 通过 CDN 引入，骨架阶段零构建 -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="h-screen bg-slate-50 text-slate-800">
+  <div class="flex h-full">
+    <!-- 左侧导航栏 -->
+    <aside class="w-56 shrink-0 bg-slate-900 text-slate-200 flex flex-col">
+      <div class="px-5 py-5 text-lg font-semibold tracking-wide border-b border-slate-700">
+        数理化错题本
+      </div>
+      <nav class="flex-1 py-4">
+        <ul class="space-y-1">
+          <li>
+            <button class="nav-item active w-full text-left px-5 py-3 hover:bg-slate-800" data-view="notebook">错题本</button>
+          </li>
+          <li>
+            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="editor">录入/编辑</button>
+          </li>
+          <li>
+            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="similar">举一反三</button>
+          </li>
+          <li>
+            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="review">复习计划</button>
+          </li>
+          <li>
+            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="settings">设置</button>
+          </li>
+        </ul>
+      </nav>
+      <div class="px-5 py-3 text-xs text-slate-500 border-t border-slate-700">
+        <span id="backend-status">后端：检测中…</span>
+      </div>
+    </aside>
+
+    <!-- 右侧主内容区 -->
+    <main class="flex-1 overflow-y-auto">
+      <header class="flex items-center justify-between px-8 py-5 bg-white border-b border-slate-200">
+        <h1 id="view-title" class="text-xl font-semibold">错题本</h1>
+        <button id="refresh-btn" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700">
+          刷新列表
+        </button>
+      </header>
+
+      <section class="p-8">
+        <!-- 错题卡片列表容器 -->
+        <div id="problems-container" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <!-- 卡片由 render.js 动态注入 -->
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="render.js"></script>
+</body>
+</html>

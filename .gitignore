@@ -1,0 +1,17 @@
+# Node / Electron
+node_modules/
+dist/
+
+# Python
+backend/venv/
+__pycache__/
+*.pyc
+
+# 本地数据库与数据目录
+backend/data/
+
+# 操作系统 / 编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
