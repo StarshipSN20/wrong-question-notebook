@@ -27,6 +27,14 @@
   overflow: hidden;
 }
 
+/* 题目详情弹窗：点击遮罩关闭 */
+#detail-modal {
+  transition: opacity 0.15s;
+}
+#detail-modal:not(.hidden) {
+  display: flex !important;
+}
+
 /* 导出勾选项 hover 高亮 */
 .export-item:hover {
   border-color: #93c5fd; /* blue-300 */

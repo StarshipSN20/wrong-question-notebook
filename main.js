@@ -3,8 +3,9 @@
 // 2. 轮询 /health，后端就绪后创建 1024x768 窗口加载前端。
 // 3. 应用退出时干净地杀掉 Python 子进程，防止残留。
 
-const { app, BrowserWindow, Notification } = require("electron");
+const { app, BrowserWindow, Notification, ipcMain, dialog } = require("electron");
 const { spawn } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 const http = require("http");
 
@@ -146,6 +147,7 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.js"),
     },
   });
 
@@ -154,6 +156,39 @@ function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+}
+
+// 渲染进程请求导出 PDF：先让用户选保存位置，再用隐藏窗口渲染 HTML 后打印。
+async function handleExportPdf(_event, payload) {
+  const html = payload && typeof payload === "object" ? payload.html : payload;
+  const suggested =
+    payload && payload.suggestedName ? payload.suggestedName : "mistakes.pdf";
+
+  const { canceled, filePath } = await dialog.showSaveDialog({
+    defaultPath: suggested,
+    filters: [{ name: "PDF", extensions: ["pdf"] }],
+  });
+  if (canceled || !filePath) return { canceled: true };
+
+  const printWin = new BrowserWindow({
+    show: false,
+    webPreferences: { sandbox: true },
+  });
+  try {
+    await printWin.loadURL(
+      "data:text/html;charset=utf-8," + encodeURIComponent(html)
+    );
+    // 等待 KaTeX auto-render（defer 脚本）执行完
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const pdf = await printWin.webContents.printToPDF({
+      pageSize: "A4",
+      printBackground: true,
+    });
+    fs.writeFileSync(filePath, pdf);
+    return { canceled: false, filePath };
+  } finally {
+    if (!printWin.isDestroyed()) printWin.destroy();
+  }
 }
 
 // 干净地终止后端进程。
@@ -168,6 +203,7 @@ function stopBackend() {
 app.whenReady().then(async () => {
   // Windows 通知需要一个稳定的 AppUserModelID，否则通知可能不显示。
   app.setAppUserModelId("com.mistakenotebook.app");
+  ipcMain.handle("export-pdf", handleExportPdf);
 
   startBackend();
   try {

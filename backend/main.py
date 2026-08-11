@@ -24,6 +24,7 @@ from models import (
     ConfigModel,
     CorrectLatexRequest,
     ExportRequest,
+    GenerateAnswerRequest,
     GenerateSimilarRequest,
     ProblemCreate,
     ProblemOut,
@@ -57,7 +58,8 @@ JSON_SPEC = (
     '{"subject": "数学/物理/化学 之一", '
     '"latex_code": "题目内容（遵守上述格式规则）", '
     '"raw_text": "题目的纯文本形式", '
-    '"tags": ["知识点标签1", "知识点标签2"]}'
+    '"tags": ["知识点标签1", "知识点标签2"], '
+    '"answer_latex": "题目的解答/答案（遵守上述格式规则；若原图或原文中没有解答，则输出空字符串 \\"\\"）"}'
 )
 
 OCR_PROMPT = (
@@ -94,18 +96,42 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
+def _split_q_a(content: str) -> tuple[str, Optional[str]]:
+    """把「【题目】…【解答】…」的内容拆成（题目, 答案）。
+
+    旧数据里题目和解答混在 latex_code 中（如举一反三生成的题），
+    这里按标记拆分；没有标记则整段视为题目，答案为 None。
+    """
+    if not content:
+        return "", None
+    m = re.search(r"【\s*题目\s*】(.*?)【\s*解答\s*】(.*)", content, re.DOTALL)
+    if m:
+        question = m.group(1).strip()
+        answer = m.group(2).strip()
+        return question, answer or None
+    return content.strip(), None
+
+
 def _row_to_problem(row) -> ProblemOut:
-    """把 sqlite3.Row 转成 ProblemOut，tags 字段从 JSON 字符串反序列化。"""
+    """把 sqlite3.Row 转成 ProblemOut，tags 字段从 JSON 字符串反序列化。
+
+    question_latex / answer_latex：优先用库里的 answer_latex 列；
+    为空时尝试从 latex_code 按【题目】/【解答】标记拆分（兼容旧数据）。
+    """
     raw_tags = row["tags"]
     try:
         tags = json.loads(raw_tags) if raw_tags else []
     except (json.JSONDecodeError, TypeError):
         tags = []
+    question, split_answer = _split_q_a(row["latex_code"] or row["raw_text"] or "")
+    answer = row["answer_latex"] or split_answer
     return ProblemOut(
         id=row["id"],
         image_path=row["image_path"],
         raw_text=row["raw_text"],
         latex_code=row["latex_code"],
+        question_latex=question or None,
+        answer_latex=answer or None,
         subject=row["subject"],
         tags=tags,
         created_at=row["created_at"],
@@ -151,6 +177,36 @@ def _parse_ai_json(text: str) -> dict:
     return {"raw_text": text, "latex_code": text, "subject": None, "tags": []}
 
 
+def _sanitize_latex(latex: str) -> str:
+    """后处理 AI 生成的 LaTeX，修复常见格式偏差。
+
+    即使提示词要求了 \\( \\) / \\[ \\]，某些模型仍可能输出
+    $…$、$$…$$、\\begin{equation} 等格式——这些 KaTeX 也能渲染，
+    但为了统一和避免嵌套冲突，统一转成 \\( \\) / \\[ \\]。
+    """
+    if not latex:
+        return latex
+
+    # 行间：\begin{equation} / \begin{equation*} / \begin{align} / \begin{align*} → \[
+    latex = re.sub(r"\\begin\{equation\*?\}", r"\\[", latex)
+    latex = re.sub(r"\\end\{equation\*?\}", r"\\]", latex)
+    latex = re.sub(r"\\begin\{align\*?\}", r"\\[", latex)
+    latex = re.sub(r"\\end\{align\*?\}", r"\\]", latex)
+    latex = re.sub(r"\\begin\{aligned\*?\}", r"\\[\\begin{aligned}", latex)
+    latex = re.sub(r"\\end\{aligned\*?\}", r"\\end{aligned}\\]", latex)
+
+    # 行间：$$ … $$ → \[ … \]（避免与 KaTeX 的 $$ 分隔符产生冲突）
+    latex = re.sub(r"\$\$\s*(.+?)\s*\$\$", r"\\[\1\\]", latex, flags=re.DOTALL)
+
+    # 行内：$ … $ → \( … \)
+    latex = re.sub(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", r"\\(\1\\)", latex)
+
+    # 清理多余空行（连续 3+ 个换行 → 2 个）
+    latex = re.sub(r"\n{3,}", "\n\n", latex)
+
+    return latex
+
+
 def _extract_pdf_text(path: Path) -> str:
     """提取 PDF 文本层（扫描版纯图片 PDF 会得到空串）。"""
     from pypdf import PdfReader
@@ -177,10 +233,18 @@ def _insert_problem(
     raw_image_hash: Optional[str],
     is_generated: bool = False,
     parent_id: Optional[int] = None,
+    answer_latex: Optional[str] = None,
 ) -> ProblemOut:
-    """插入一条错题：created_at 为当天，next_review_date 按艾宾浩斯首个间隔计算。"""
+    """插入一条错题：created_at 为当天，next_review_date 按艾宾浩斯首个间隔计算。
+
+    tags 自动带上学科标签（如数学/物理/化学），方便按学科筛选。
+    """
     today = date.today().isoformat()
-    tags_json = json.dumps(tags or [], ensure_ascii=False)
+    # 学科标签自动附加（去重）：所有录入路径统一生效。
+    tags = list(tags or [])
+    if subject and subject not in tags:
+        tags = [subject] + tags
+    tags_json = json.dumps(tags, ensure_ascii=False)
     next_review = scheduler.next_review_date(0)
 
     conn = database.get_connection()
@@ -190,8 +254,8 @@ def _insert_problem(
             INSERT INTO problems
                 (image_path, raw_text, latex_code, subject, tags,
                  created_at, next_review_date, review_stage, raw_image_hash,
-                 is_generated, parent_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 is_generated, parent_id, answer_latex)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 image_path,
@@ -205,6 +269,7 @@ def _insert_problem(
                 raw_image_hash,
                 1 if is_generated else 0,
                 parent_id,
+                answer_latex,
             ),
         )
         conn.commit()
@@ -250,6 +315,19 @@ def create_problem(problem: ProblemCreate) -> ProblemOut:
     )
 
 
+@app.get("/api/problems/{problem_id}", response_model=ProblemOut)
+def get_problem(problem_id: int) -> ProblemOut:
+    """按 id 获取单道错题。"""
+    conn = database.get_connection()
+    try:
+        row = _fetch_problem(conn, problem_id)
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="错题不存在")
+    return _row_to_problem(row)
+
+
 @app.patch("/api/problems/{problem_id}", response_model=ProblemOut)
 def update_problem(problem_id: int, patch: ProblemUpdate) -> ProblemOut:
     """手动编辑错题（部分字段），支撑前端 LaTeX 源码「更新」按钮。"""
@@ -267,6 +345,9 @@ def update_problem(problem_id: int, patch: ProblemUpdate) -> ProblemOut:
         if patch.latex_code is not None:
             fields.append("latex_code = ?")
             values.append(patch.latex_code)
+        if patch.answer_latex is not None:
+            fields.append("answer_latex = ?")
+            values.append(patch.answer_latex)
         if patch.subject is not None:
             fields.append("subject = ?")
             values.append(patch.subject)
@@ -397,6 +478,7 @@ async def upload_problem(file: UploadFile = File(...)) -> ProblemOut:
         subject=parsed.get("subject"),
         tags=parsed.get("tags") or [],
         raw_image_hash=file_hash,
+        answer_latex=_sanitize_latex(parsed.get("answer_latex") or "") or None,
     )
 
 
@@ -447,6 +529,56 @@ async def correct_latex(req: CorrectLatexRequest) -> ProblemOut:
     return _row_to_problem(row)
 
 
+@app.post("/api/generate-answer", response_model=ProblemOut)
+async def generate_answer(req: GenerateAnswerRequest) -> ProblemOut:
+    """用 AI 根据题目生成完整解答，存入 answer_latex 并返回。"""
+    conn = database.get_connection()
+    try:
+        row = _fetch_problem(conn, req.problem_id)
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="错题不存在")
+
+    question, _ = _split_q_a(row["latex_code"] or row["raw_text"] or "")
+    if not question:
+        raise HTTPException(status_code=400, detail="题目内容为空，无法生成答案")
+
+    prompt = (
+        "你是一个数理化解题助手。请为下面这道题写出完整、清晰的解答步骤，"
+        "包含必要的公式推导与最终答案。\n"
+        + FORMAT_RULES
+        + "\n只返回解答内容本身，不要任何解释，不要 Markdown 代码块标记。\n\n"
+        + f"题目：\n{question}"
+    )
+
+    try:
+        ai_text = await ai_client.call_ai(prompt)
+    except ai_client.AIConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ai_client.AIRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # 去掉可能的代码块包裹
+    cleaned = ai_text.strip()
+    fence = re.match(r"^```(?:latex)?\s*(.*?)\s*```$", cleaned, re.DOTALL)
+    if fence:
+        cleaned = fence.group(1).strip()
+    answer = _sanitize_latex(cleaned) or None
+
+    conn = database.get_connection()
+    try:
+        conn.execute(
+            "UPDATE problems SET answer_latex = ? WHERE id = ?",
+            (answer, req.problem_id),
+        )
+        conn.commit()
+        row = _fetch_problem(conn, req.problem_id)
+    finally:
+        conn.close()
+    return _row_to_problem(row)
+
+
 # ---------------------------------------------------------------------------
 # 举一反三
 # ---------------------------------------------------------------------------
@@ -482,7 +614,13 @@ async def generate_similar(req: GenerateSimilarRequest) -> ProblemOut:
         + "\n新题必须附带完整解题步骤。\n"
         + FORMAT_RULES
         + JSON_SPEC
-        + "\n特别要求：latex_code 内先写【题目】再写【解答】，两部分之间用换行分隔。\n\n"
+        + "\n特别要求：latex_code 内先写【题目】再写【解答】，两部分之间用换行分隔。\n"
+        + "\n！！！重要警告！！！\n"
+        + "- 严禁在 JSON 的 latex_code 字符串内使用未转义的反斜杠（如 \\frac 在 JSON 中必须写作 \\\\frac），否则前端 KaTeX 渲染会失败。\n"
+        + "- 严禁使用 $…$ 或 $$…$$ 作为公式分隔符，必须使用 \\(…\\) 和 \\[…\\]。\n"
+        + "- 严禁使用 \\begin{equation} 或 \\begin{align} 环境，必须用 \\[ … \\] 替代。\n"
+        + "- 只输出纯 JSON 对象，禁止包裹在 ```json 代码块或任何其他标记中。\n"
+        + "\n"
         + f"原题（学科：{subject or '未知'}）：\n{source}"
     )
 
@@ -497,7 +635,7 @@ async def generate_similar(req: GenerateSimilarRequest) -> ProblemOut:
     return _insert_problem(
         image_path=None,
         raw_text=parsed.get("raw_text"),
-        latex_code=parsed.get("latex_code"),
+        latex_code=_sanitize_latex(parsed.get("latex_code") or ""),
         subject=parsed.get("subject") or subject,
         tags=parsed.get("tags") or [],
         raw_image_hash=None,
@@ -577,19 +715,26 @@ def export_latex(req: ExportRequest) -> Response:
     if not rows:
         raise HTTPException(status_code=404, detail="所选错题不存在")
 
-    # 按用户勾选顺序排列。
+    # 按用户勾选顺序排列，拆分题目/答案。
     by_id = {row["id"]: row for row in rows}
     ordered = [by_id[i] for i in req.problem_ids if i in by_id]
-    problems = [
-        {
-            "subject": r["subject"],
-            "latex_code": r["latex_code"],
-            "raw_text": r["raw_text"],
-        }
-        for r in ordered
-    ]
+    problems = []
+    for r in ordered:
+        question, split_answer = _split_q_a(r["latex_code"] or r["raw_text"] or "")
+        problems.append(
+            {
+                "subject": r["subject"],
+                "question_latex": question or None,
+                "answer_latex": r["answer_latex"] or split_answer,
+                "raw_text": r["raw_text"],
+            }
+        )
 
-    tex = exporter.build_tex(problems)
+    tex = exporter.build_tex(
+        problems,
+        include_answers=req.include_answers,
+        answers_last=req.answers_last,
+    )
     return Response(
         content=tex,
         media_type="application/x-tex",

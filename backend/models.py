@@ -20,12 +20,18 @@ class ProblemCreate(BaseModel):
 
 
 class ProblemOut(BaseModel):
-    """返回给前端的错题条目。"""
+    """返回给前端的错题条目。
+
+    question_latex / answer_latex 是后端拆分后的题目部分与答案部分
+    （从 latex_code 中按 【题目】/【解答】 标记拆分，旧数据自动兼容）。
+    """
 
     id: int
     image_path: Optional[str] = None
     raw_text: Optional[str] = None
     latex_code: Optional[str] = None
+    question_latex: Optional[str] = None
+    answer_latex: Optional[str] = None
     subject: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     created_at: str
@@ -42,6 +48,7 @@ class ProblemUpdate(BaseModel):
 
     raw_text: Optional[str] = None
     latex_code: Optional[str] = None
+    answer_latex: Optional[str] = None
     subject: Optional[str] = None
     tags: Optional[List[str]] = None
 
@@ -68,7 +75,19 @@ class GenerateSimilarRequest(BaseModel):
     type: str = "变式"
 
 
+class GenerateAnswerRequest(BaseModel):
+    """用 AI 为题目生成答案的入参。"""
+
+    problem_id: int
+
+
 class ExportRequest(BaseModel):
-    """批量导出 LaTeX 的入参。"""
+    """批量导出的入参。
+
+    include_answers：是否包含答案；answers_last：答案集中放到文档最后
+    （两者都含答案时：false=答案紧跟每题，true=答案放在最后）。
+    """
 
     problem_ids: List[int]
+    include_answers: bool = True
+    answers_last: bool = False

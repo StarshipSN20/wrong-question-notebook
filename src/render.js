@@ -22,6 +22,12 @@ const SUBJECT_COLORS = {
 let currentProblem = null;
 // 待上传的文件
 let pendingFile = null;
+// 已加载的错题缓存（id → ProblemOut），供详情弹窗用
+const problemsCache = new Map();
+// 详情弹窗当前显示的题目
+let detailProblem = null;
+// 错题本搜索关键字（按标签匹配）
+let searchQuery = "";
 
 function escapeHtml(value) {
   if (value === null || value === undefined) return "";
@@ -67,7 +73,8 @@ function renderCard(problem) {
     )
     .join(" ");
 
-  const content = problem.latex_code || problem.raw_text || "（无题目文本）";
+  // 预览只用题目部分；答案在详情弹窗里看
+  const content = problem.question_latex || problem.latex_code || problem.raw_text || "（无题目文本）";
 
   const generatedBadge = problem.is_generated
     ? `<span class="inline-block px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">源自 #${escapeHtml(
@@ -76,7 +83,8 @@ function renderCard(problem) {
     : "";
 
   return `
-    <article class="bg-white rounded-lg border border-slate-200 p-4 shadow-sm hover:shadow-md transition-shadow">
+    <article class="bg-white rounded-lg border border-slate-200 p-4 shadow-sm hover:shadow-md transition-shadow cursor-pointer"
+             data-id="${escapeHtml(problem.id)}">
       <div class="flex items-center justify-between mb-2">
         <div class="flex items-center gap-2">
           <span class="inline-block px-2 py-0.5 text-xs rounded ${subjectClass}">${escapeHtml(
@@ -116,17 +124,31 @@ async function loadProblems() {
   try {
     const res = await fetch(`${API_BASE}/api/problems`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const problems = await res.json();
+    let problems = await res.json();
+
+    // 按标签过滤（大小写不敏感，子串匹配）
+    const q = searchQuery.toLowerCase();
+    if (q) {
+      problems = problems.filter((p) =>
+        (Array.isArray(p.tags) ? p.tags : []).some((t) =>
+          t.toLowerCase().includes(q)
+        )
+      );
+    }
 
     if (!problems.length) {
       container.innerHTML = `
         <div class="col-span-full text-center py-16 text-slate-400">
-          <p class="text-lg mb-1">还没有错题</p>
-          <p class="text-sm">在「录入/编辑」中上传图片/PDF/DOCX 让 AI 识别，或用 POST /api/problems 手动新增。</p>
+          <p class="text-lg mb-1">${q ? "没有找到匹配的错题" : "还没有错题"}</p>
+          <p class="text-sm">${q
+            ? `没有题目带标签「${escapeHtml(searchQuery)}」。`
+            : "在「录入/编辑」中上传图片/PDF/DOCX 让 AI 识别，或用 POST /api/problems 手动新增。"}</p>
         </div>`;
       return;
     }
 
+    problemsCache.clear();
+    problems.forEach((p) => problemsCache.set(p.id, p));
     container.innerHTML = problems.map(renderCard).join("");
     renderLatex(container);
   } catch (err) {
@@ -140,13 +162,29 @@ async function loadProblems() {
   }
 }
 
-// 卡片事件委托：删除（.delete-btn）与举一反三（.gen-btn）。
+// 单题详情刷新：只更新缓存中对应题目，不刷新整个列表。
+async function refreshSingleProblem(id) {
+  try {
+    const res = await fetch(`${API_BASE}/api/problems/${id}`);
+    if (res.ok) {
+      const p = await res.json();
+      problemsCache.set(p.id, p);
+    }
+  } catch {
+    // 静默失败，缓存保持旧值
+  }
+}
+
+// 卡片事件委托：删除（.delete-btn）与举一反三（.gen-btn）与查看详情（article[data-id]）。
 async function onCardClick(e) {
   const delBtn = e.target.closest(".delete-btn");
   if (delBtn) return deleteProblem(delBtn.dataset.id);
 
   const genBtn = e.target.closest(".gen-btn");
   if (genBtn) return generateSimilar(genBtn);
+
+  const card = e.target.closest("article[data-id]");
+  if (card) showProblemDetail(Number(card.dataset.id));
 }
 
 async function deleteProblem(id) {
@@ -159,9 +197,231 @@ async function deleteProblem(id) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.detail || `HTTP ${res.status}`);
     }
+    problemsCache.delete(id);
     loadProblems();
   } catch (err) {
     window.alert(`删除失败：${err.message}`);
+  }
+}
+
+// 题目详情弹窗
+function showProblemDetail(id) {
+  // 优先走缓存；缓存未命中时尝试从后端拉取
+  const cached = problemsCache.get(id);
+  if (cached) return renderDetail(cached);
+
+  fetch(`${API_BASE}/api/problems/${id}`)
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then((p) => {
+      problemsCache.set(p.id, p);
+      renderDetail(p);
+    })
+    .catch((err) => window.alert(`加载题目失败：${err.message}`));
+}
+
+function renderDetail(p) {
+  detailProblem = p;
+  document.getElementById("detail-subject").textContent = p.subject || "未分类";
+  document.getElementById("detail-subject").className =
+    `inline-block px-2 py-0.5 text-xs rounded ${SUBJECT_COLORS[p.subject] || "bg-slate-100 text-slate-700"}`;
+  document.getElementById("detail-id").textContent = `#${p.id}`;
+
+  const badge = document.getElementById("detail-badge");
+  if (p.is_generated) {
+    badge.textContent = `源自 #${p.parent_id}`;
+    badge.classList.remove("hidden");
+  } else {
+    badge.classList.add("hidden");
+  }
+
+  // 题目面板：只用题目部分
+  const content = document.getElementById("detail-content");
+  content.textContent =
+    p.question_latex || p.latex_code || p.raw_text || "（无题目文本）";
+  renderLatex(content);
+
+  renderAnswerPanel();
+  renderDetailTags();
+  setDetailTab("question");
+
+  document.getElementById("detail-created").textContent = p.created_at || "-";
+  document.getElementById("detail-review-date").textContent = p.next_review_date || "-";
+  document.getElementById("detail-review-stage").textContent = p.review_stage ?? 0;
+
+  document.getElementById("detail-modal").classList.remove("hidden");
+}
+
+function closeDetailModal() {
+  document.getElementById("detail-modal").classList.add("hidden");
+}
+
+// 答案面板：有答案则渲染，无答案显示空态（手动输入 / AI 生成）
+function renderAnswerPanel() {
+  const p = detailProblem;
+  const render = document.getElementById("detail-answer-render");
+  const empty = document.getElementById("answer-empty");
+  const edit = document.getElementById("answer-edit");
+  const editBtn = document.getElementById("answer-edit-btn");
+
+  const answer = p.answer_latex;
+  render.textContent = answer || "";
+  renderLatex(render);
+
+  const hasAnswer = !!(answer && answer.trim());
+  render.classList.toggle("hidden", !hasAnswer);
+  empty.classList.toggle("hidden", hasAnswer);
+  edit.classList.add("hidden");
+  editBtn.classList.toggle("hidden", !hasAnswer);
+  document.getElementById("answer-input").value = answer || "";
+  document.getElementById("answer-status").textContent = "";
+}
+
+// 详情弹窗标签区渲染
+function renderDetailTags() {
+  const p = detailProblem;
+  const tags = Array.isArray(p.tags) ? p.tags : [];
+  document.getElementById("detail-tags").innerHTML = tags
+    .map(
+      (t) => `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-slate-100 text-slate-600 rounded">
+        ${escapeHtml(t)}
+        <button class="tag-del-btn text-slate-400 hover:text-red-500" data-tag="${escapeHtml(t)}" title="删除标签">✕</button>
+      </span>`
+    )
+    .join("");
+}
+
+// 题目/答案 tab 切换
+function setDetailTab(tab) {
+  const isQuestion = tab === "question";
+  document.getElementById("tab-question").className =
+    "detail-tab px-4 py-2.5 text-sm font-medium border-b-2 " +
+    (isQuestion ? "border-blue-600 text-blue-700" : "border-transparent text-slate-500 hover:text-slate-700");
+  document.getElementById("tab-answer").className =
+    "detail-tab px-4 py-2.5 text-sm font-medium border-b-2 " +
+    (isQuestion ? "border-transparent text-slate-500 hover:text-slate-700" : "border-blue-600 text-blue-700");
+  document.getElementById("panel-question").classList.toggle("hidden", !isQuestion);
+  document.getElementById("panel-answer").classList.toggle("hidden", isQuestion);
+}
+
+// 手动输入答案：显示编辑区
+function showAnswerEdit() {
+  document.getElementById("answer-empty").classList.add("hidden");
+  document.getElementById("answer-edit").classList.remove("hidden");
+  document.getElementById("answer-edit-btn").classList.add("hidden");
+  document.getElementById("answer-input").focus();
+}
+
+// 保存手动输入的答案（PATCH answer_latex）
+async function saveAnswer() {
+  if (!detailProblem) return;
+  const input = document.getElementById("answer-input");
+  const status = document.getElementById("answer-status");
+  status.textContent = "保存中…";
+  try {
+    const res = await fetch(`${API_BASE}/api/problems/${detailProblem.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer_latex: input.value.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    detailProblem = data;
+    problemsCache.set(data.id, data);
+    renderAnswerPanel();
+    status.textContent = "已保存 ✓";
+    status.className = "text-sm text-emerald-600";
+  } catch (err) {
+    status.textContent = `保存失败：${err.message}`;
+    status.className = "text-sm text-red-500";
+  }
+}
+
+// 用 AI 生成答案
+async function generateAnswerByAI() {
+  if (!detailProblem) return;
+  const status = document.getElementById("answer-status");
+  const btn = document.getElementById("answer-ai-btn");
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "生成中…";
+  status.textContent = "AI 生成中，请稍候…";
+  status.className = "text-sm text-slate-500";
+  try {
+    const res = await fetch(`${API_BASE}/api/generate-answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ problem_id: detailProblem.id }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    detailProblem = data;
+    problemsCache.set(data.id, data);
+    renderAnswerPanel();
+    status.textContent = "已生成 ✓";
+    status.className = "text-sm text-emerald-600";
+  } catch (err) {
+    status.textContent = `生成失败：${err.message}`;
+    status.className = "text-sm text-red-500";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+// 添加标签（PATCH tags）
+async function addTag() {
+  if (!detailProblem) return;
+  const input = document.getElementById("tag-input");
+  const tag = input.value.trim();
+  if (!tag) return;
+  const status = document.getElementById("tag-status");
+  const current = Array.isArray(detailProblem.tags) ? detailProblem.tags : [];
+  if (current.includes(tag)) {
+    status.textContent = "该标签已存在";
+    status.className = "text-xs text-slate-400";
+    return;
+  }
+  status.textContent = "保存中…";
+  try {
+    const res = await fetch(`${API_BASE}/api/problems/${detailProblem.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: [...current, tag] }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    detailProblem = data;
+    problemsCache.set(data.id, data);
+    renderDetailTags();
+    input.value = "";
+    status.textContent = "已添加 ✓";
+    status.className = "text-xs text-emerald-600";
+  } catch (err) {
+    status.textContent = `添加失败：${err.message}`;
+    status.className = "text-xs text-red-500";
+  }
+}
+
+// 删除标签
+async function removeTag(tag) {
+  if (!detailProblem) return;
+  const current = Array.isArray(detailProblem.tags) ? detailProblem.tags : [];
+  try {
+    const res = await fetch(`${API_BASE}/api/problems/${detailProblem.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: current.filter((t) => t !== tag) }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    detailProblem = data;
+    problemsCache.set(data.id, data);
+    renderDetailTags();
+  } catch (err) {
+    window.alert(`删除标签失败：${err.message}`);
   }
 }
 
@@ -258,6 +518,7 @@ async function loadSimilar() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const all = await res.json();
     const generated = all.filter((p) => p.is_generated);
+    all.forEach((p) => problemsCache.set(p.id, p));
     if (!generated.length) {
       container.innerHTML = `
         <div class="col-span-full text-center py-16 text-slate-400">
@@ -381,6 +642,16 @@ async function loadExportList() {
   }
 }
 
+// 读取当前选中的导出版本 → { include_answers, answers_last }
+function getExportVersion() {
+  const v = document.querySelector(
+    'input[name="export-version"]:checked'
+  )?.value;
+  if (v === "no-answers") return { include_answers: false, answers_last: false };
+  if (v === "answers-last") return { include_answers: true, answers_last: true };
+  return { include_answers: true, answers_last: false };
+}
+
 async function exportSelected() {
   const ids = Array.from(
     document.querySelectorAll("#export-container .export-cb:checked")
@@ -395,7 +666,7 @@ async function exportSelected() {
     const res = await fetch(`${API_BASE}/api/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ problem_ids: ids }),
+      body: JSON.stringify({ problem_ids: ids, ...getExportVersion() }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -415,6 +686,109 @@ async function exportSelected() {
   } finally {
     btn.disabled = false;
   }
+}
+
+// 导出 PDF：构造打印用 HTML → 主进程 printToPDF → 保存对话框
+async function exportPDF() {
+  const checked = Array.from(
+    document.querySelectorAll("#export-container .export-cb:checked")
+  ).map((cb) => Number(cb.value));
+  if (!checked.length) {
+    window.alert("请先勾选要导出的错题。");
+    return;
+  }
+  const items = checked
+    .map((id) => problemsCache.get(id))
+    .filter(Boolean)
+    .map((p) => ({
+      id: p.id,
+      subject: p.subject || "未分类",
+      question: p.question_latex || p.latex_code || p.raw_text || "（无内容）",
+      answer: p.answer_latex || "",
+    }));
+  if (!items.length) {
+    window.alert("所选错题数据未加载，请刷新后重试。");
+    return;
+  }
+
+  const btn = document.getElementById("export-pdf-btn");
+  btn.disabled = true;
+  try {
+    if (!window.pdfApi || typeof window.pdfApi.exportPdf !== "function") {
+      throw new Error("当前环境不支持 PDF 导出（需通过 Electron 运行）");
+    }
+    const result = await window.pdfApi.exportPdf({
+      html: buildPdfHtml(items),
+      suggestedName: "mistakes.pdf",
+    });
+    if (!result.canceled) {
+      window.alert(`PDF 已导出：${result.filePath}`);
+    }
+  } catch (err) {
+    window.alert(`导出 PDF 失败：${err.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 构建打印 HTML：KaTeX 已随 CDN 加载，正文按版本组织
+function buildPdfHtml(items) {
+  const { include_answers, answers_last } = getExportVersion();
+  const today = new Date().toISOString().slice(0, 10);
+
+  const problemBlock = (item, num) => {
+    const q = escapeHtml(item.question);
+    const a = escapeHtml(item.answer);
+    const withAnswer = include_answers && !answers_last && a;
+    return `
+      <div class="problem">
+        <div class="p-title">第 ${num} 题（${escapeHtml(item.subject)}）</div>
+        <div class="p-body">${q}</div>
+        ${withAnswer ? `<div class="p-answer">【答案】<div>${a}</div></div>` : ""}
+      </div>`;
+  };
+
+  let body = "";
+  if (answers_last && include_answers) {
+    // 答案在最后：题目区 + 参考答案区
+    body = items.map(problemBlock).join("");
+    body += `<div class="answers-section"><h2>参考答案</h2>`;
+    items.forEach((item, i) => {
+      const a = escapeHtml(item.answer);
+      body += `<div class="problem"><div class="p-title">第 ${i + 1} 题</div><div class="p-body">${
+        a || "（无答案）"
+      }</div></div>`;
+    });
+    body += `</div>`;
+  } else {
+    body = items.map(problemBlock).join("");
+  }
+
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>数理化错题本导出</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<style>
+  body { font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; margin: 40px; color: #1e293b; }
+  h1 { font-size: 22px; margin-bottom: 24px; }
+  .problem { margin-bottom: 20px; page-break-inside: avoid; }
+  .p-title { font-weight: 600; font-size: 15px; margin-bottom: 6px; }
+  .p-body { font-size: 14px; line-height: 1.7; white-space: pre-wrap; }
+  .p-answer { margin-top: 8px; font-size: 14px; line-height: 1.7; }
+  .p-answer > div { white-space: pre-wrap; }
+  .answers-section { margin-top: 32px; page-break-before: always; }
+  .answers-section h2 { font-size: 18px; border-bottom: 2px solid #334155; padding-bottom: 6px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<h1>数理化错题本 · 错题导出（${today}）</h1>
+${body}
+</body>
+</html>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -632,6 +1006,47 @@ document.addEventListener("DOMContentLoaded", () => {
   document
     .getElementById("save-config-btn")
     .addEventListener("click", saveConfig);
+
+  // 详情弹窗关闭方式
+  document.getElementById("detail-close-btn").addEventListener("click", closeDetailModal);
+  document.getElementById("detail-modal").addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeDetailModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeDetailModal();
+  });
+
+  // 详情弹窗：题目/答案 tab
+  document.getElementById("tab-question").addEventListener("click", () => setDetailTab("question"));
+  document.getElementById("tab-answer").addEventListener("click", () => setDetailTab("answer"));
+  // 答案：手动输入 / AI 生成 / 编辑
+  document.getElementById("answer-input-btn").addEventListener("click", showAnswerEdit);
+  document.getElementById("answer-ai-btn").addEventListener("click", generateAnswerByAI);
+  document.getElementById("answer-save-btn").addEventListener("click", saveAnswer);
+  document.getElementById("answer-cancel-btn").addEventListener("click", renderAnswerPanel);
+  document.getElementById("answer-edit-btn").addEventListener("click", showAnswerEdit);
+  // 标签：添加 / 删除
+  document.getElementById("tag-add-btn").addEventListener("click", addTag);
+  document.getElementById("tag-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") addTag();
+  });
+  document.getElementById("detail-tags").addEventListener("click", (e) => {
+    const btn = e.target.closest(".tag-del-btn");
+    if (btn) removeTag(btn.dataset.tag);
+  });
+
+  // 错题本：按标签搜索（防抖 300ms）
+  let searchTimer = null;
+  document.getElementById("search-input").addEventListener("input", (e) => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      searchQuery = e.target.value.trim();
+      loadProblems();
+    }, 300);
+  });
+
+  // 导出 PDF
+  document.getElementById("export-pdf-btn").addEventListener("click", exportPDF);
 
   bindEditorEvents();
   checkBackend();

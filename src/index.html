@@ -14,7 +14,7 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@14.1.3/marked.min.js"></script>
   <link rel="stylesheet" href="styles.css" />
 </head>
-<body class="h-screen bg-slate-50 text-slate-800">
+<body class="h-screen bg-slate-50 text-slate-800 overflow-hidden">
   <div class="flex h-full">
     <!-- 左侧导航栏 -->
     <aside class="w-56 shrink-0 bg-slate-900 text-slate-200 flex flex-col">
@@ -59,6 +59,10 @@
 
       <!-- 视图：错题本 -->
       <section id="view-notebook" class="view p-8">
+        <div class="mb-4">
+          <input id="search-input" type="text" placeholder="按标签搜索，如：函数、数学…"
+                 class="w-full max-w-md border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500" />
+        </div>
         <div id="problems-container" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           <!-- 卡片由 render.js 动态注入 -->
         </div>
@@ -178,12 +182,33 @@
       <section id="view-export" class="view p-8 hidden">
         <div class="flex items-center justify-between mb-4">
           <p class="text-sm text-slate-500">
-            勾选要导出的错题，点「导出 LaTeX」下载 <code>.tex</code> 文件（建议用 XeLaTeX 编译，已含中文支持）。
+            勾选要导出的错题，选择版本后下载 <code>.tex</code> 或 <code>.pdf</code> 文件。
           </p>
-          <button id="export-btn"
-                  class="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50">
-            导出 LaTeX
-          </button>
+          <div class="flex gap-2">
+            <button id="export-btn"
+                    class="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50">
+              导出 LaTeX
+            </button>
+            <button id="export-pdf-btn"
+                    class="px-4 py-2 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700 disabled:opacity-50">
+              导出 PDF
+            </button>
+          </div>
+        </div>
+        <div class="mb-4 flex items-center gap-4 text-sm text-slate-600">
+          <span class="text-slate-400">导出版本：</span>
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="radio" name="export-version" value="with-answers" checked class="accent-blue-600" />
+            含答案
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="radio" name="export-version" value="no-answers" class="accent-blue-600" />
+            不含答案
+          </label>
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input type="radio" name="export-version" value="answers-last" class="accent-blue-600" />
+            答案在最后
+          </label>
         </div>
         <div id="export-container" class="space-y-2">
           <!-- 勾选列表由 render.js 注入 -->
@@ -198,6 +223,75 @@
         </div>
       </section>
     </main>
+  </div>
+
+  <!-- 题目详情弹窗 -->
+  <div id="detail-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 hidden">
+    <div class="bg-white rounded-xl shadow-2xl w-[720px] max-h-[85vh] flex flex-col mx-4">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-slate-200 shrink-0">
+        <div class="flex items-center gap-3">
+          <span id="detail-subject" class="inline-block px-2 py-0.5 text-xs rounded"></span>
+          <span id="detail-id" class="text-xs text-slate-400"></span>
+          <span id="detail-badge" class="hidden inline-block px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700"></span>
+        </div>
+        <button id="detail-close-btn" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+      </div>
+
+      <!-- 题目 / 答案 tab -->
+      <div class="flex border-b border-slate-200 px-6 shrink-0">
+        <button id="tab-question" class="detail-tab px-4 py-2.5 text-sm font-medium border-b-2 border-blue-600 text-blue-700">题目</button>
+        <button id="tab-answer" class="detail-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-700">答案</button>
+      </div>
+
+      <div class="overflow-y-auto px-6 py-4 flex-1">
+        <!-- 题目面板 -->
+        <div id="panel-question">
+          <div id="detail-content" class="latex-content text-slate-800 leading-relaxed"></div>
+        </div>
+
+        <!-- 答案面板 -->
+        <div id="panel-answer" class="hidden">
+          <div id="detail-answer-render" class="latex-content text-slate-800 leading-relaxed"></div>
+          <div id="answer-empty" class="hidden text-center py-8 text-slate-400">
+            <p class="mb-3">这道题还没有答案</p>
+            <div class="flex justify-center gap-2">
+              <button id="answer-input-btn" class="px-3 py-1.5 text-sm bg-slate-100 text-slate-700 rounded hover:bg-slate-200">手动输入答案</button>
+              <button id="answer-ai-btn" class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700">用 AI 生成答案</button>
+            </div>
+          </div>
+          <div id="answer-edit" class="hidden mt-2">
+            <textarea id="answer-input" rows="5" placeholder="输入答案内容（支持 \\( \\) 和 \\[ \\] 公式）"
+                      class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"></textarea>
+            <div class="flex items-center gap-2 mt-2">
+              <button id="answer-save-btn" class="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700">保存答案</button>
+              <button id="answer-cancel-btn" class="px-3 py-1.5 text-sm text-slate-500 hover:text-slate-700">取消</button>
+              <span id="answer-status" class="text-sm text-slate-500"></span>
+            </div>
+          </div>
+          <div class="mt-3">
+            <button id="answer-edit-btn" class="hidden text-xs text-slate-400 hover:text-blue-600">编辑答案</button>
+          </div>
+        </div>
+
+        <!-- 标签（可添加） -->
+        <div class="mt-4 pt-4 border-t border-slate-100">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-xs text-slate-400">标签：</span>
+            <div id="detail-tags" class="flex flex-wrap gap-1"></div>
+            <input id="tag-input" type="text" placeholder="添加标签…"
+                   class="border border-slate-300 rounded px-2 py-0.5 text-xs w-32 focus:outline-none focus:border-blue-500" />
+            <button id="tag-add-btn" class="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700">添加</button>
+            <span id="tag-status" class="text-xs text-slate-500"></span>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-4 mt-4 pt-4 border-t border-slate-100 text-xs text-slate-400">
+          <span>创建于：<span id="detail-created"></span></span>
+          <span>下次复习：<span id="detail-review-date"></span></span>
+          <span>复习阶段：<span id="detail-review-stage"></span>/5</span>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script src="render.js"></script>
