@@ -38,9 +38,10 @@ function renderLatex(element) {
   try {
     window.renderMathInElement(element, {
       delimiters: [
-        { left: "\\(", right: "\\)", display: false },
         { left: "\\[", right: "\\]", display: true },
+        { left: "\\(", right: "\\)", display: false },
         { left: "$$", right: "$$", display: true },
+        { left: "$", right: "$", display: false },
       ],
       throwOnError: false,
     });
@@ -73,7 +74,12 @@ function renderCard(problem) {
         <span class="inline-block px-2 py-0.5 text-xs rounded ${subjectClass}">${escapeHtml(
     problem.subject || "未分类"
   )}</span>
-        <span class="text-xs text-slate-400">#${escapeHtml(problem.id)}</span>
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-slate-400">#${escapeHtml(problem.id)}</span>
+          <button class="delete-btn text-slate-300 hover:text-red-500 text-sm leading-none" data-id="${escapeHtml(
+            problem.id
+          )}" title="删除">✕</button>
+        </div>
       </div>
       <div class="latex-content text-sm text-slate-700 mb-3 line-clamp-3">${escapeHtml(
         content
@@ -115,6 +121,26 @@ async function loadProblems() {
           err.message
         )}（请确认 FastAPI 已启动于 ${API_BASE}）</p>
       </div>`;
+  }
+}
+
+// 删除错题（事件委托：卡片上的 .delete-btn）。
+async function onCardClick(e) {
+  const btn = e.target.closest(".delete-btn");
+  if (!btn) return;
+  const id = btn.dataset.id;
+  if (!window.confirm("确定删除这道错题吗？此操作不可恢复。")) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/problems/${id}`, {
+      method: "DELETE",
+    });
+    if (!res.ok && res.status !== 204) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || `HTTP ${res.status}`);
+    }
+    loadProblems();
+  } catch (err) {
+    window.alert(`删除失败：${err.message}`);
   }
 }
 
@@ -369,6 +395,9 @@ document.addEventListener("DOMContentLoaded", () => {
     btn.addEventListener("click", () => switchView(btn.dataset.view));
   });
   document.getElementById("refresh-btn").addEventListener("click", loadProblems);
+  document
+    .getElementById("problems-container")
+    .addEventListener("click", onCardClick);
   document
     .getElementById("save-config-btn")
     .addEventListener("click", saveConfig);

@@ -15,7 +15,7 @@ from typing import List, Optional
 
 import aiofiles
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 import config
@@ -39,24 +39,34 @@ IMAGE_MIME = {
     ".bmp": "image/bmp",
 }
 
-# AI 识别提示词：要求严格返回 JSON，便于后端解析。
-OCR_PROMPT = (
-    "你是一个数理化错题识别助手。请识别图片中的题目，并只返回一个 JSON 对象，"
-    "不要包含任何解释或 Markdown 代码块标记。JSON 字段如下：\n"
+# 统一的格式规则：确保前端 KaTeX 能正确渲染，且多题不会挤在一起。
+FORMAT_RULES = (
+    "严格遵守以下格式规则：\n"
+    "1. 所有数学/物理/化学公式必须用 \\\\( \\\\) 包裹行内公式、用 \\\\[ \\\\] 包裹行间公式；"
+    "禁止使用 $ … $、$$ … $$、\\\\begin{equation} 等任何其它公式定界符。\n"
+    "2. 如果内容里有多道题，每道题各占一段，题与题之间用换行符 \\n 分隔，并在每题开头标注序号（如 1.、2.、3.）。\n"
+    "3. latex_code 是 JSON 字符串，LaTeX 里的反斜杠必须按 JSON 规则转义（例如 \\\\frac 写成 \\\\\\\\frac）。\n"
+    "4. 只返回一个 JSON 对象，不要输出任何解释、前后缀或 Markdown 代码块标记。\n"
+)
+
+# JSON 字段说明（OCR 与文本整理共用）。
+JSON_SPEC = (
+    "JSON 字段如下：\n"
     '{"subject": "数学/物理/化学 之一", '
-    '"latex_code": "题目内容，数学公式用 \\\\( \\\\) 行内或 \\\\[ \\\\] 行间 LaTeX 包裹", '
+    '"latex_code": "题目内容（遵守上述格式规则）", '
     '"raw_text": "题目的纯文本形式", '
     '"tags": ["知识点标签1", "知识点标签2"]}'
 )
 
+OCR_PROMPT = (
+    "你是一个数理化错题识别助手。请识别图片中的全部题目。\n" + FORMAT_RULES + JSON_SPEC
+)
+
 TEXT_PROMPT = (
-    "你是一个数理化错题整理助手。下面是从文件中提取的题目文本，请整理它并只返回一个 "
-    "JSON 对象，不要包含任何解释或 Markdown 代码块标记。JSON 字段如下：\n"
-    '{"subject": "数学/物理/化学 之一", '
-    '"latex_code": "题目内容，数学公式用 \\\\( \\\\) 行内或 \\\\[ \\\\] 行间 LaTeX 包裹", '
-    '"raw_text": "题目的纯文本形式", '
-    '"tags": ["知识点标签1", "知识点标签2"]}\n\n'
-    "提取到的文本如下：\n"
+    "你是一个数理化错题整理助手。请整理下面从文件中提取的题目文本。\n"
+    + FORMAT_RULES
+    + JSON_SPEC
+    + "\n\n提取到的文本如下：\n"
 )
 
 
@@ -266,6 +276,31 @@ def update_problem(problem_id: int, patch: ProblemUpdate) -> ProblemOut:
     return _row_to_problem(row)
 
 
+@app.delete("/api/problems/{problem_id}", status_code=204)
+def delete_problem(problem_id: int) -> Response:
+    """删除错题，并清理其孤立的上传文件（每个文件按 hash 唯一，删记录即可删文件）。"""
+    conn = database.get_connection()
+    try:
+        row = _fetch_problem(conn, problem_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="错题不存在")
+        image_path = row["image_path"]
+        conn.execute("DELETE FROM problems WHERE id = ?", (problem_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    if image_path:
+        try:
+            p = Path(image_path)
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass  # 文件清理失败不影响删除结果
+
+    return Response(status_code=204)
+
+
 # ---------------------------------------------------------------------------
 # 配置接口
 # ---------------------------------------------------------------------------
@@ -368,8 +403,9 @@ async def correct_latex(req: CorrectLatexRequest) -> ProblemOut:
     current_latex = row["latex_code"] or row["raw_text"] or ""
     prompt = (
         "你是一个 LaTeX 题目修正助手。下面是当前题目的 LaTeX 代码，请根据用户的修改要求"
-        "输出修正后的完整 LaTeX 代码。只返回修正后的 LaTeX 代码本身，不要任何解释、"
-        "不要 Markdown 代码块标记。\n\n"
+        "输出修正后的完整 LaTeX 代码。\n"
+        "公式一律用 \\( \\) 包裹行内、\\[ \\] 包裹行间，禁止使用 $ 或 $$；多道题之间用换行符分隔。\n"
+        "只返回修正后的 LaTeX 代码本身，不要任何解释，不要 Markdown 代码块标记。\n\n"
         f"当前 LaTeX：\n{current_latex}\n\n"
         f"用户修改要求：{req.user_feedback}"
     )

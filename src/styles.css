@@ -7,6 +7,12 @@
   font-weight: 600;
 }
 
+/* 题目正文：保留 AI 返回的换行，让多道题分行显示（配合后端提示词的换行分隔） */
+.latex-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* 卡片正文多行截断（Tailwind line-clamp 的兜底实现） */
 .line-clamp-3 {
   display: -webkit-box;
