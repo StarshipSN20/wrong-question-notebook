@@ -29,6 +29,13 @@ def get_db_path() -> Path:
     return get_data_dir() / "notebook.db"
 
 
+def get_uploads_dir() -> Path:
+    """返回上传文件目录（{userData}/uploads），不存在时自动创建。"""
+    uploads_dir = get_data_dir() / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+    return uploads_dir
+
+
 def get_connection() -> sqlite3.Connection:
     """返回一个新的数据库连接。
 
@@ -40,7 +47,11 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """初始化数据库：创建 problems（错题）表。"""
+    """初始化数据库：创建 problems（错题）表，并执行幂等迁移。
+
+    迁移保持向后兼容（只新增字段/索引，不改动已有结构）：
+    - 阶段二：新增 raw_image_hash（上传去重）与 idx_next_review 索引。
+    """
     conn = get_connection()
     try:
         conn.execute(
@@ -58,6 +69,19 @@ def init_db() -> None:
             )
             """
         )
+
+        # 幂等迁移：老库缺 raw_image_hash 时补列。
+        existing_cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(problems)").fetchall()
+        }
+        if "raw_image_hash" not in existing_cols:
+            conn.execute("ALTER TABLE problems ADD COLUMN raw_image_hash TEXT")
+
+        # 复习查询索引（阶段三 GET /api/review/due 会用到）。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_next_review ON problems(next_review_date)"
+        )
+
         conn.commit()
     finally:
         conn.close()

@@ -31,3 +31,28 @@ class ProblemOut(BaseModel):
     created_at: str
     next_review_date: str
     review_stage: int
+    raw_image_hash: Optional[str] = None
+
+
+class ProblemUpdate(BaseModel):
+    """手动编辑错题的入参（全部可选，只更新提供的字段）。"""
+
+    raw_text: Optional[str] = None
+    latex_code: Optional[str] = None
+    subject: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+class ConfigModel(BaseModel):
+    """AI 接口配置（读写「设置」页）。"""
+
+    api_key: str = ""
+    base_url: str = ""
+    model_name: str = ""
+
+
+class CorrectLatexRequest(BaseModel):
+    """自然语言修正题目的入参。"""
+
+    problem_id: int
+    user_feedback: str

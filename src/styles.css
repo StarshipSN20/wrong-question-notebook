@@ -14,3 +14,15 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+/* 上传拖拽区 */
+.dropzone {
+  transition: border-color 0.15s, background-color 0.15s;
+}
+.dropzone:hover {
+  border-color: #3b82f6; /* blue-500 */
+}
+.dropzone.dragover {
+  border-color: #3b82f6;
+  background-color: #eff6ff; /* blue-50 */
+}
