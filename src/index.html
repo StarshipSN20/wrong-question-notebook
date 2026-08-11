@@ -36,6 +36,9 @@
             <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="review">复习计划</button>
           </li>
           <li>
+            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="export">导出</button>
+          </li>
+          <li>
             <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="settings">设置</button>
           </li>
         </ul>
@@ -149,7 +152,45 @@
         </div>
       </section>
 
-      <!-- 视图：占位（举一反三 / 复习计划） -->
+      <!-- 视图：举一反三 -->
+      <section id="view-similar" class="view p-8 hidden">
+        <p class="text-sm text-slate-500 mb-4">
+          在「错题本」的任意卡片上点击「生成变式」或「生成拓展」，AI 会基于原题出一道带解答的新题。
+          下面列出所有已生成的题目（带「源自」标签）。
+        </p>
+        <div id="similar-container" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          <!-- 生成的题目卡片由 render.js 注入 -->
+        </div>
+      </section>
+
+      <!-- 视图：复习计划 -->
+      <section id="view-review" class="view p-8 hidden">
+        <p class="text-sm text-slate-500 mb-4">
+          按艾宾浩斯遗忘曲线（1 / 2 / 4 / 7 / 15 天）排程。下面是今天（含逾期）待复习的错题，
+          复习完点「标记为已复习」即可推进到下一阶段。
+        </p>
+        <div id="review-container" class="space-y-3">
+          <!-- 待复习列表由 render.js 注入 -->
+        </div>
+      </section>
+
+      <!-- 视图：导出 -->
+      <section id="view-export" class="view p-8 hidden">
+        <div class="flex items-center justify-between mb-4">
+          <p class="text-sm text-slate-500">
+            勾选要导出的错题，点「导出 LaTeX」下载 <code>.tex</code> 文件（建议用 XeLaTeX 编译，已含中文支持）。
+          </p>
+          <button id="export-btn"
+                  class="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50">
+            导出 LaTeX
+          </button>
+        </div>
+        <div id="export-container" class="space-y-2">
+          <!-- 勾选列表由 render.js 注入 -->
+        </div>
+      </section>
+
+      <!-- 视图：占位（保留） -->
       <section id="view-placeholder" class="view p-8 hidden">
         <div class="text-center py-16 text-slate-400">
           <p id="placeholder-title" class="text-lg mb-1"></p>

@@ -20,6 +20,17 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* 导出勾选项 hover 高亮 */
+.export-item:hover {
+  border-color: #93c5fd; /* blue-300 */
+}
 
 /* 上传拖拽区 */
 .dropzone {

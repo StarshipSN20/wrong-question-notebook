@@ -23,11 +23,13 @@ import database
 from models import (
     ConfigModel,
     CorrectLatexRequest,
+    ExportRequest,
+    GenerateSimilarRequest,
     ProblemCreate,
     ProblemOut,
     ProblemUpdate,
 )
-from services import ai_client
+from services import ai_client, exporter, scheduler
 
 # 支持的图片扩展名 → MIME（走多模态 vision）。
 IMAGE_MIME = {
@@ -110,6 +112,9 @@ def _row_to_problem(row) -> ProblemOut:
         next_review_date=row["next_review_date"],
         review_stage=row["review_stage"],
         raw_image_hash=row["raw_image_hash"],
+        is_generated=bool(row["is_generated"]),
+        parent_id=row["parent_id"],
+        last_review_date=row["last_review_date"],
     )
 
 
@@ -170,10 +175,13 @@ def _insert_problem(
     subject: Optional[str],
     tags: List[str],
     raw_image_hash: Optional[str],
+    is_generated: bool = False,
+    parent_id: Optional[int] = None,
 ) -> ProblemOut:
-    """插入一条错题，created_at / next_review_date 默认当天，返回新记录。"""
+    """插入一条错题：created_at 为当天，next_review_date 按艾宾浩斯首个间隔计算。"""
     today = date.today().isoformat()
     tags_json = json.dumps(tags or [], ensure_ascii=False)
+    next_review = scheduler.next_review_date(0)
 
     conn = database.get_connection()
     try:
@@ -181,8 +189,9 @@ def _insert_problem(
             """
             INSERT INTO problems
                 (image_path, raw_text, latex_code, subject, tags,
-                 created_at, next_review_date, review_stage, raw_image_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 created_at, next_review_date, review_stage, raw_image_hash,
+                 is_generated, parent_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 image_path,
@@ -191,9 +200,11 @@ def _insert_problem(
                 subject,
                 tags_json,
                 today,
-                today,
+                next_review,
                 0,
                 raw_image_hash,
+                1 if is_generated else 0,
+                parent_id,
             ),
         )
         conn.commit()
@@ -434,6 +445,156 @@ async def correct_latex(req: CorrectLatexRequest) -> ProblemOut:
     finally:
         conn.close()
     return _row_to_problem(row)
+
+
+# ---------------------------------------------------------------------------
+# 举一反三
+# ---------------------------------------------------------------------------
+@app.post("/api/generate-similar", response_model=ProblemOut, status_code=201)
+async def generate_similar(req: GenerateSimilarRequest) -> ProblemOut:
+    """基于父题用 AI 生成「变式」或「拓展」新题，作为独立错题存库并返回。"""
+    conn = database.get_connection()
+    try:
+        row = _fetch_problem(conn, req.problem_id)
+    finally:
+        conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="错题不存在")
+
+    gen_type = (req.type or "变式").strip()
+    if gen_type == "拓展":
+        task = (
+            "请基于下面这道题，生成一道【进阶拓展题】：在原题知识点基础上适度提高难度、"
+            "综合更多知识点或增加推理步骤，保持同一学科。"
+        )
+    else:
+        gen_type = "变式"
+        task = (
+            "请基于下面这道题，生成一道【同类变式题】：考查相同知识点，"
+            "更换数值/情境/表述，难度与原题相当，保持同一学科。"
+        )
+
+    source = row["latex_code"] or row["raw_text"] or ""
+    subject = row["subject"]
+    prompt = (
+        "你是一个数理化出题助手。"
+        + task
+        + "\n新题必须附带完整解题步骤。\n"
+        + FORMAT_RULES
+        + JSON_SPEC
+        + "\n特别要求：latex_code 内先写【题目】再写【解答】，两部分之间用换行分隔。\n\n"
+        + f"原题（学科：{subject or '未知'}）：\n{source}"
+    )
+
+    try:
+        ai_text = await ai_client.call_ai(prompt)
+    except ai_client.AIConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ai_client.AIRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    parsed = _parse_ai_json(ai_text)
+    return _insert_problem(
+        image_path=None,
+        raw_text=parsed.get("raw_text"),
+        latex_code=parsed.get("latex_code"),
+        subject=parsed.get("subject") or subject,
+        tags=parsed.get("tags") or [],
+        raw_image_hash=None,
+        is_generated=True,
+        parent_id=req.problem_id,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 复习计划（艾宾浩斯）
+# ---------------------------------------------------------------------------
+@app.get("/api/review/due", response_model=List[ProblemOut])
+def review_due() -> List[ProblemOut]:
+    """返回今日（含逾期）待复习、且未掌握的错题。"""
+    today = date.today().isoformat()
+    max_stage = len(scheduler.INTERVALS)
+    conn = database.get_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT * FROM problems
+            WHERE next_review_date <= ? AND review_stage < ?
+            ORDER BY next_review_date, id
+            """,
+            (today, max_stage),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [_row_to_problem(row) for row in rows]
+
+
+@app.post("/api/review/{problem_id}/complete", response_model=ProblemOut)
+def complete_review(problem_id: int) -> ProblemOut:
+    """标记一道错题为已复习：推进复习阶段并重算下次复习日期。"""
+    today = date.today()
+    conn = database.get_connection()
+    try:
+        row = _fetch_problem(conn, problem_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="错题不存在")
+
+        new_stage = int(row["review_stage"]) + 1
+        next_review = scheduler.next_review_date(new_stage, today)
+        conn.execute(
+            """
+            UPDATE problems
+            SET review_stage = ?, last_review_date = ?, next_review_date = ?
+            WHERE id = ?
+            """,
+            (new_stage, today.isoformat(), next_review, problem_id),
+        )
+        conn.commit()
+        row = _fetch_problem(conn, problem_id)
+    finally:
+        conn.close()
+    return _row_to_problem(row)
+
+
+# ---------------------------------------------------------------------------
+# LaTeX 导出
+# ---------------------------------------------------------------------------
+@app.post("/api/export")
+def export_latex(req: ExportRequest) -> Response:
+    """按勾选的 problem_ids 生成 .tex 文件流供前端下载。"""
+    if not req.problem_ids:
+        raise HTTPException(status_code=400, detail="未选择任何错题")
+
+    placeholders = ",".join("?" for _ in req.problem_ids)
+    conn = database.get_connection()
+    try:
+        rows = conn.execute(
+            f"SELECT * FROM problems WHERE id IN ({placeholders})",
+            tuple(req.problem_ids),
+        ).fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        raise HTTPException(status_code=404, detail="所选错题不存在")
+
+    # 按用户勾选顺序排列。
+    by_id = {row["id"]: row for row in rows}
+    ordered = [by_id[i] for i in req.problem_ids if i in by_id]
+    problems = [
+        {
+            "subject": r["subject"],
+            "latex_code": r["latex_code"],
+            "raw_text": r["raw_text"],
+        }
+        for r in ordered
+    ]
+
+    tex = exporter.build_tex(problems)
+    return Response(
+        content=tex,
+        media_type="application/x-tex",
+        headers={"Content-Disposition": "attachment; filename=mistakes.tex"},
+    )
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 // 2. 轮询 /health，后端就绪后创建 1024x768 窗口加载前端。
 // 3. 应用退出时干净地杀掉 Python 子进程，防止残留。
 
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, Notification } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const http = require("http");
@@ -11,9 +11,12 @@ const http = require("http");
 const BACKEND_HOST = "127.0.0.1";
 const BACKEND_PORT = 8000;
 const HEALTH_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/health`;
+const DUE_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}/api/review/due`;
+const REMINDER_INTERVAL_MS = 60 * 60 * 1000; // 每小时检查一次
 
 let backendProcess = null;
 let mainWindow = null;
+let reminderTimer = null;
 
 // 解析虚拟环境中的 Python 解释器路径（Windows 优先，其他平台兜底）。
 function resolvePythonExecutable() {
@@ -83,6 +86,59 @@ function waitForBackend(retries = 40, intervalMs = 500) {
   });
 }
 
+// 查询今日待复习数量（GET /api/review/due），失败时静默返回 0。
+function fetchDueCount() {
+  return new Promise((resolve) => {
+    const req = http.get(DUE_URL, (res) => {
+      let body = "";
+      res.on("data", (chunk) => (body += chunk));
+      res.on("end", () => {
+        try {
+          const list = JSON.parse(body);
+          resolve(Array.isArray(list) ? list.length : 0);
+        } catch {
+          resolve(0);
+        }
+      });
+    });
+    req.on("error", () => resolve(0));
+    req.setTimeout(3000, () => req.destroy());
+  });
+}
+
+// 弹出艾宾浩斯复习提醒（若当天有待复习题目）。
+async function checkReviewReminders() {
+  if (!Notification.isSupported()) return;
+  const count = await fetchDueCount();
+  if (count <= 0) return;
+
+  const notification = new Notification({
+    title: "复习提醒",
+    body: `今天有 ${count} 道错题待复习，点击打开错题本。`,
+  });
+  notification.on("click", () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+  notification.show();
+}
+
+// 启动复习提醒定时器：启动后延迟首查，之后每小时一次。
+function startReviewReminders() {
+  setTimeout(checkReviewReminders, 5000);
+  reminderTimer = setInterval(checkReviewReminders, REMINDER_INTERVAL_MS);
+}
+
+function stopReviewReminders() {
+  if (reminderTimer) {
+    clearInterval(reminderTimer);
+    reminderTimer = null;
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1024,
@@ -110,6 +166,9 @@ function stopBackend() {
 }
 
 app.whenReady().then(async () => {
+  // Windows 通知需要一个稳定的 AppUserModelID，否则通知可能不显示。
+  app.setAppUserModelId("com.mistakenotebook.app");
+
   startBackend();
   try {
     await waitForBackend();
@@ -117,6 +176,7 @@ app.whenReady().then(async () => {
     console.error(err.message, "— 仍将打开窗口，前端会提示无法连接后端。");
   }
   createWindow();
+  startReviewReminders();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -124,6 +184,7 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
+  stopReviewReminders();
   stopBackend();
   if (process.platform !== "darwin") app.quit();
 });

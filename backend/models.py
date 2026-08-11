@@ -32,6 +32,9 @@ class ProblemOut(BaseModel):
     next_review_date: str
     review_stage: int
     raw_image_hash: Optional[str] = None
+    is_generated: bool = False
+    parent_id: Optional[int] = None
+    last_review_date: Optional[str] = None
 
 
 class ProblemUpdate(BaseModel):
@@ -56,3 +59,16 @@ class CorrectLatexRequest(BaseModel):
 
     problem_id: int
     user_feedback: str
+
+
+class GenerateSimilarRequest(BaseModel):
+    """举一反三的入参：type 为「变式」或「拓展」。"""
+
+    problem_id: int
+    type: str = "变式"
+
+
+class ExportRequest(BaseModel):
+    """批量导出 LaTeX 的入参。"""
+
+    problem_ids: List[int]

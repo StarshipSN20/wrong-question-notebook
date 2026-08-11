@@ -7,6 +7,7 @@ const VIEW_TITLES = {
   editor: "录入/编辑",
   similar: "举一反三",
   review: "复习计划",
+  export: "导出",
   settings: "设置",
 };
 
@@ -68,12 +69,21 @@ function renderCard(problem) {
 
   const content = problem.latex_code || problem.raw_text || "（无题目文本）";
 
+  const generatedBadge = problem.is_generated
+    ? `<span class="inline-block px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">源自 #${escapeHtml(
+        problem.parent_id
+      )}</span>`
+    : "";
+
   return `
     <article class="bg-white rounded-lg border border-slate-200 p-4 shadow-sm hover:shadow-md transition-shadow">
       <div class="flex items-center justify-between mb-2">
-        <span class="inline-block px-2 py-0.5 text-xs rounded ${subjectClass}">${escapeHtml(
+        <div class="flex items-center gap-2">
+          <span class="inline-block px-2 py-0.5 text-xs rounded ${subjectClass}">${escapeHtml(
     problem.subject || "未分类"
   )}</span>
+          ${generatedBadge}
+        </div>
         <div class="flex items-center gap-2">
           <span class="text-xs text-slate-400">#${escapeHtml(problem.id)}</span>
           <button class="delete-btn text-slate-300 hover:text-red-500 text-sm leading-none" data-id="${escapeHtml(
@@ -85,6 +95,12 @@ function renderCard(problem) {
         content
       )}</div>
       <div class="flex flex-wrap gap-1 mb-3">${tagsHtml}</div>
+      <div class="flex items-center gap-2 mb-3">
+        <button class="gen-btn px-2 py-1 text-xs bg-indigo-50 text-indigo-700 rounded hover:bg-indigo-100"
+                data-id="${escapeHtml(problem.id)}" data-type="变式">生成变式</button>
+        <button class="gen-btn px-2 py-1 text-xs bg-indigo-50 text-indigo-700 rounded hover:bg-indigo-100"
+                data-id="${escapeHtml(problem.id)}" data-type="拓展">生成拓展</button>
+      </div>
       <div class="flex items-center justify-between text-xs text-slate-400 border-t border-slate-100 pt-2">
         <span>下次复习：${escapeHtml(problem.next_review_date)}</span>
         <span>阶段 ${escapeHtml(problem.review_stage)}/5</span>
@@ -124,11 +140,16 @@ async function loadProblems() {
   }
 }
 
-// 删除错题（事件委托：卡片上的 .delete-btn）。
+// 卡片事件委托：删除（.delete-btn）与举一反三（.gen-btn）。
 async function onCardClick(e) {
-  const btn = e.target.closest(".delete-btn");
-  if (!btn) return;
-  const id = btn.dataset.id;
+  const delBtn = e.target.closest(".delete-btn");
+  if (delBtn) return deleteProblem(delBtn.dataset.id);
+
+  const genBtn = e.target.closest(".gen-btn");
+  if (genBtn) return generateSimilar(genBtn);
+}
+
+async function deleteProblem(id) {
   if (!window.confirm("确定删除这道错题吗？此操作不可恢复。")) return;
   try {
     const res = await fetch(`${API_BASE}/api/problems/${id}`, {
@@ -141,6 +162,31 @@ async function onCardClick(e) {
     loadProblems();
   } catch (err) {
     window.alert(`删除失败：${err.message}`);
+  }
+}
+
+// 生成变式/拓展题（举一反三）。
+async function generateSimilar(btn) {
+  const id = btn.dataset.id;
+  const type = btn.dataset.type || "变式";
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "生成中…";
+  try {
+    const res = await fetch(`${API_BASE}/api/generate-similar`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ problem_id: Number(id), type }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    window.alert(`已生成${type}题 #${data.id}，可在「错题本」或「举一反三」查看。`);
+    loadProblems();
+  } catch (err) {
+    window.alert(`生成失败：${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
   }
 }
 
@@ -181,15 +227,193 @@ function switchView(view) {
     loadProblems();
   } else if (view === "editor") {
     document.getElementById("view-editor").classList.remove("hidden");
+  } else if (view === "similar") {
+    document.getElementById("view-similar").classList.remove("hidden");
+    loadSimilar();
+  } else if (view === "review") {
+    document.getElementById("view-review").classList.remove("hidden");
+    loadReviewDue();
+  } else if (view === "export") {
+    document.getElementById("view-export").classList.remove("hidden");
+    loadExportList();
   } else if (view === "settings") {
     document.getElementById("view-settings").classList.remove("hidden");
     loadConfig();
   } else {
-    // 举一反三 / 复习计划：占位
     const ph = document.getElementById("view-placeholder");
     document.getElementById("placeholder-title").textContent =
       `「${VIEW_TITLES[view]}」`;
     ph.classList.remove("hidden");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 举一反三视图：列出所有已生成题目
+// ---------------------------------------------------------------------------
+async function loadSimilar() {
+  const container = document.getElementById("similar-container");
+  container.innerHTML = `<p class="text-slate-400 col-span-full">加载中…</p>`;
+  try {
+    const res = await fetch(`${API_BASE}/api/problems`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const all = await res.json();
+    const generated = all.filter((p) => p.is_generated);
+    if (!generated.length) {
+      container.innerHTML = `
+        <div class="col-span-full text-center py-16 text-slate-400">
+          <p class="text-lg mb-1">还没有生成的题目</p>
+          <p class="text-sm">去「错题本」某道题上点「生成变式」或「生成拓展」。</p>
+        </div>`;
+      return;
+    }
+    container.innerHTML = generated.map(renderCard).join("");
+    renderLatex(container);
+  } catch (err) {
+    container.innerHTML = `<p class="text-red-400 col-span-full">加载失败：${escapeHtml(
+      err.message
+    )}</p>`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 复习计划视图
+// ---------------------------------------------------------------------------
+async function loadReviewDue() {
+  const container = document.getElementById("review-container");
+  container.innerHTML = `<p class="text-slate-400">加载中…</p>`;
+  try {
+    const res = await fetch(`${API_BASE}/api/review/due`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const due = await res.json();
+    if (!due.length) {
+      container.innerHTML = `
+        <div class="text-center py-16 text-slate-400">
+          <p class="text-lg mb-1">今天没有待复习的错题 🎉</p>
+          <p class="text-sm">新录入的错题会在次日进入复习计划。</p>
+        </div>`;
+      return;
+    }
+    container.innerHTML = due
+      .map((p) => {
+        const content = p.latex_code || p.raw_text || "（无题目文本）";
+        return `
+          <div class="review-item bg-white rounded-lg border border-slate-200 p-4 flex items-start justify-between gap-4">
+            <div class="min-w-0">
+              <div class="text-xs text-slate-400 mb-1">#${escapeHtml(
+                p.id
+              )} · ${escapeHtml(p.subject || "未分类")} · 阶段 ${escapeHtml(
+          p.review_stage
+        )}/5</div>
+              <div class="latex-content text-sm text-slate-700 line-clamp-3">${escapeHtml(
+                content
+              )}</div>
+            </div>
+            <button class="review-done-btn shrink-0 px-3 py-2 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700"
+                    data-id="${escapeHtml(p.id)}">标记为已复习</button>
+          </div>`;
+      })
+      .join("");
+    renderLatex(container);
+  } catch (err) {
+    container.innerHTML = `<p class="text-red-400">加载失败：${escapeHtml(
+      err.message
+    )}</p>`;
+  }
+}
+
+async function completeReview(id) {
+  try {
+    const res = await fetch(`${API_BASE}/api/review/${id}/complete`, {
+      method: "POST",
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || `HTTP ${res.status}`);
+    }
+    loadReviewDue();
+  } catch (err) {
+    window.alert(`操作失败：${err.message}`);
+  }
+}
+
+function onReviewClick(e) {
+  const btn = e.target.closest(".review-done-btn");
+  if (btn) completeReview(btn.dataset.id);
+}
+
+// ---------------------------------------------------------------------------
+// 导出视图
+// ---------------------------------------------------------------------------
+async function loadExportList() {
+  const container = document.getElementById("export-container");
+  container.innerHTML = `<p class="text-slate-400">加载中…</p>`;
+  try {
+    const res = await fetch(`${API_BASE}/api/problems`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const problems = await res.json();
+    if (!problems.length) {
+      container.innerHTML = `<p class="text-slate-400 text-center py-16">还没有错题可导出。</p>`;
+      return;
+    }
+    container.innerHTML = problems
+      .map((p) => {
+        const content = p.latex_code || p.raw_text || "（无题目文本）";
+        return `
+          <label class="export-item flex items-start gap-3 bg-white rounded-lg border border-slate-200 p-3 cursor-pointer">
+            <input type="checkbox" class="export-cb mt-1" value="${escapeHtml(
+              p.id
+            )}" />
+            <div class="min-w-0">
+              <div class="text-xs text-slate-400 mb-1">#${escapeHtml(
+                p.id
+              )} · ${escapeHtml(p.subject || "未分类")}</div>
+              <div class="text-sm text-slate-700 line-clamp-2">${escapeHtml(
+                content
+              )}</div>
+            </div>
+          </label>`;
+      })
+      .join("");
+  } catch (err) {
+    container.innerHTML = `<p class="text-red-400">加载失败：${escapeHtml(
+      err.message
+    )}</p>`;
+  }
+}
+
+async function exportSelected() {
+  const ids = Array.from(
+    document.querySelectorAll("#export-container .export-cb:checked")
+  ).map((cb) => Number(cb.value));
+  if (!ids.length) {
+    window.alert("请先勾选要导出的错题。");
+    return;
+  }
+  const btn = document.getElementById("export-btn");
+  btn.disabled = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ problem_ids: ids }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || `HTTP ${res.status}`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "mistakes.tex";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    window.alert(`导出失败：${err.message}`);
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -398,6 +622,13 @@ document.addEventListener("DOMContentLoaded", () => {
   document
     .getElementById("problems-container")
     .addEventListener("click", onCardClick);
+  document
+    .getElementById("similar-container")
+    .addEventListener("click", onCardClick);
+  document
+    .getElementById("review-container")
+    .addEventListener("click", onReviewClick);
+  document.getElementById("export-btn").addEventListener("click", exportSelected);
   document
     .getElementById("save-config-btn")
     .addEventListener("click", saveConfig);

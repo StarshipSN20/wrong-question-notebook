@@ -51,6 +51,7 @@ def init_db() -> None:
 
     迁移保持向后兼容（只新增字段/索引，不改动已有结构）：
     - 阶段二：新增 raw_image_hash（上传去重）与 idx_next_review 索引。
+    - 阶段三：新增 is_generated / parent_id（举一反三）与 last_review_date（复习）。
     """
     conn = get_connection()
     try:
@@ -70,12 +71,20 @@ def init_db() -> None:
             """
         )
 
-        # 幂等迁移：老库缺 raw_image_hash 时补列。
+        # 幂等迁移：老库缺列时逐列补齐（ALTER TABLE ADD COLUMN）。
         existing_cols = {
             row["name"] for row in conn.execute("PRAGMA table_info(problems)").fetchall()
         }
         if "raw_image_hash" not in existing_cols:
             conn.execute("ALTER TABLE problems ADD COLUMN raw_image_hash TEXT")
+        if "is_generated" not in existing_cols:
+            conn.execute(
+                "ALTER TABLE problems ADD COLUMN is_generated INTEGER NOT NULL DEFAULT 0"
+            )
+        if "parent_id" not in existing_cols:
+            conn.execute("ALTER TABLE problems ADD COLUMN parent_id INTEGER")
+        if "last_review_date" not in existing_cols:
+            conn.execute("ALTER TABLE problems ADD COLUMN last_review_date TEXT")
 
         # 复习查询索引（阶段三 GET /api/review/due 会用到）。
         conn.execute(
