@@ -554,11 +554,14 @@ async function loadReviewDue() {
         </div>`;
       return;
     }
+    due.forEach((p) => problemsCache.set(p.id, p));
     container.innerHTML = due
       .map((p) => {
-        const content = p.latex_code || p.raw_text || "（无题目文本）";
+        const content =
+          p.question_latex || p.latex_code || p.raw_text || "（无题目文本）";
         return `
-          <div class="review-item bg-white rounded-lg border border-slate-200 p-4 flex items-start justify-between gap-4">
+          <div class="review-item bg-white rounded-lg border border-slate-200 p-4 flex items-start justify-between gap-4 cursor-pointer hover:border-blue-300"
+               data-id="${escapeHtml(p.id)}">
             <div class="min-w-0">
               <div class="text-xs text-slate-400 mb-1">#${escapeHtml(
                 p.id
@@ -599,7 +602,10 @@ async function completeReview(id) {
 
 function onReviewClick(e) {
   const btn = e.target.closest(".review-done-btn");
-  if (btn) completeReview(btn.dataset.id);
+  if (btn) return completeReview(btn.dataset.id);
+  // 点击列表其他区域 → 打开详情弹窗
+  const item = e.target.closest(".review-item[data-id]");
+  if (item) showProblemDetail(Number(item.dataset.id));
 }
 
 // ---------------------------------------------------------------------------
@@ -616,25 +622,28 @@ async function loadExportList() {
       container.innerHTML = `<p class="text-slate-400 text-center py-16">还没有错题可导出。</p>`;
       return;
     }
+    problems.forEach((p) => problemsCache.set(p.id, p));
     container.innerHTML = problems
       .map((p) => {
-        const content = p.latex_code || p.raw_text || "（无题目文本）";
+        const content =
+          p.question_latex || p.latex_code || p.raw_text || "（无题目文本）";
         return `
-          <label class="export-item flex items-start gap-3 bg-white rounded-lg border border-slate-200 p-3 cursor-pointer">
+          <div class="export-item flex items-start gap-3 bg-white rounded-lg border border-slate-200 p-3 cursor-pointer">
             <input type="checkbox" class="export-cb mt-1" value="${escapeHtml(
               p.id
             )}" />
-            <div class="min-w-0">
+            <div class="export-body min-w-0 flex-1" data-id="${escapeHtml(p.id)}">
               <div class="text-xs text-slate-400 mb-1">#${escapeHtml(
                 p.id
               )} · ${escapeHtml(p.subject || "未分类")}</div>
-              <div class="text-sm text-slate-700 line-clamp-2">${escapeHtml(
+              <div class="latex-content text-sm text-slate-700 line-clamp-2">${escapeHtml(
                 content
               )}</div>
             </div>
-          </label>`;
+          </div>`;
       })
       .join("");
+    renderLatex(container);
   } catch (err) {
     container.innerHTML = `<p class="text-red-400">加载失败：${escapeHtml(
       err.message
@@ -731,10 +740,12 @@ async function exportPDF() {
   }
 }
 
-// 构建打印 HTML：KaTeX 已随 CDN 加载，正文按版本组织
+// 构建打印 HTML：KaTeX 随 CDN 加载（公式用 Computer Modern 字体），
+// 版式参考中文 LaTeX 试卷：宋体正文 + 居中大标题 + A4 学术页边距。
 function buildPdfHtml(items) {
   const { include_answers, answers_last } = getExportVersion();
   const today = new Date().toISOString().slice(0, 10);
+  const count = items.length;
 
   const problemBlock = (item, num) => {
     const q = escapeHtml(item.question);
@@ -744,14 +755,14 @@ function buildPdfHtml(items) {
       <div class="problem">
         <div class="p-title">第 ${num} 题（${escapeHtml(item.subject)}）</div>
         <div class="p-body">${q}</div>
-        ${withAnswer ? `<div class="p-answer">【答案】<div>${a}</div></div>` : ""}
+        ${withAnswer ? `<div class="p-answer"><div class="p-answer-label">【答案】</div><div>${a}</div></div>` : ""}
       </div>`;
   };
 
   let body = "";
   if (answers_last && include_answers) {
-    // 答案在最后：题目区 + 参考答案区
-    body = items.map(problemBlock).join("");
+    // 答案在最后：题目区 + 参考答案区（参考答案另起一页）
+    body = items.map((item, i) => problemBlock(item, i + 1)).join("");
     body += `<div class="answers-section"><h2>参考答案</h2>`;
     items.forEach((item, i) => {
       const a = escapeHtml(item.answer);
@@ -761,7 +772,7 @@ function buildPdfHtml(items) {
     });
     body += `</div>`;
   } else {
-    body = items.map(problemBlock).join("");
+    body = items.map((item, i) => problemBlock(item, i + 1)).join("");
   }
 
   return `<!DOCTYPE html>
@@ -772,20 +783,95 @@ function buildPdfHtml(items) {
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
 <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<script>
+  // auto-render 脚本只定义函数不会自动渲染，必须显式调用。
+  // defer 脚本在 DOMContentLoaded 前已执行，故在此注册 DOMContentLoaded。
+  // 渲染完成后打标记，主进程轮询确认后再打印，避免 PDF 里出现 LaTeX 源码。
+  // 注意：这里是模板字符串，\\\\ 输出后才是页面里的 \\（JS 里 \\ 才是 \[）。
+  document.addEventListener("DOMContentLoaded", function () {
+    if (window.renderMathInElement) {
+      window.renderMathInElement(document.body, {
+        delimiters: [
+          { left: "\\\\[", right: "\\\\]", display: true },
+          { left: "\\\\(", right: "\\\\)", display: false },
+          { left: "$$", right: "$$", display: true },
+          { left: "$", right: "$", display: false },
+        ],
+        throwOnError: false,
+      });
+    }
+    window.__pdfRendered = true;
+  });
+</script>
 <style>
-  body { font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif; margin: 40px; color: #1e293b; }
-  h1 { font-size: 22px; margin-bottom: 24px; }
-  .problem { margin-bottom: 20px; page-break-inside: avoid; }
-  .p-title { font-weight: 600; font-size: 15px; margin-bottom: 6px; }
-  .p-body { font-size: 14px; line-height: 1.7; white-space: pre-wrap; }
-  .p-answer { margin-top: 8px; font-size: 14px; line-height: 1.7; }
-  .p-answer > div { white-space: pre-wrap; }
-  .answers-section { margin-top: 32px; page-break-before: always; }
-  .answers-section h2 { font-size: 18px; border-bottom: 2px solid #334155; padding-bottom: 6px; margin-bottom: 16px; }
+  @page { size: A4; margin: 20mm 18mm 22mm; }
+  body {
+    font-family: "SimSun", "Songti SC", "Noto Serif CJK SC", serif;
+    color: #111;
+    font-size: 12pt;
+    line-height: 1.8;
+    margin: 0;
+  }
+  /* 试卷头部：居中大标题 + 日期说明 */
+  .paper-head { text-align: center; margin-bottom: 4mm; }
+  h1 {
+    font-family: "SimHei", "Heiti SC", "Noto Sans CJK SC", sans-serif;
+    font-size: 20pt;
+    letter-spacing: 6px;
+    margin: 0 0 3mm;
+    font-weight: 700;
+  }
+  .paper-meta { font-size: 10.5pt; color: #444; margin: 0; }
+  .paper-rule { border: none; border-top: 1.5px solid #111; margin: 5mm 0 8mm; }
+
+  /* 题目 */
+  .problem { margin-bottom: 7mm; page-break-inside: avoid; }
+  .p-title {
+    font-family: "SimHei", "Heiti SC", "Noto Sans CJK SC", sans-serif;
+    font-weight: 700;
+    font-size: 12.5pt;
+    margin-bottom: 2mm;
+  }
+  .p-body { font-size: 12pt; white-space: pre-wrap; text-align: justify; }
+  .p-body p { margin: 0 0 1.5mm; }
+
+  /* 答案（含答案版）：灰色边框左侧竖线，像答案册 */
+  .p-answer {
+    margin-top: 3mm;
+    padding: 2.5mm 4mm;
+    border-left: 3px solid #888;
+    background: #fafafa;
+    font-size: 11.5pt;
+    white-space: pre-wrap;
+    line-height: 1.75;
+  }
+  .p-answer-label { font-weight: 700; color: #333; margin-bottom: 1mm; }
+
+  /* 参考答案（答案在最后版）：另起一页，标题不悬空 */
+  .answers-section { page-break-before: always; }
+  .answers-section h2 {
+    font-family: "SimHei", "Heiti SC", "Noto Sans CJK SC", sans-serif;
+    font-size: 16pt;
+    text-align: center;
+    letter-spacing: 4px;
+    border-bottom: 1.5px solid #111;
+    padding-bottom: 2mm;
+    margin: 0 0 6mm;
+    page-break-after: avoid;
+  }
+  .answers-section .p-title { font-size: 11.5pt; }
+  .answers-section .p-body { font-size: 11.5pt; }
+
+  /* 题号从新页开始时不孤行 */
+  .problem { break-inside: avoid; }
 </style>
 </head>
 <body>
-<h1>数理化错题本 · 错题导出（${today}）</h1>
+  <div class="paper-head">
+    <h1>错题本 · 复习卷</h1>
+    <p class="paper-meta">共 ${count} 题 · 导出日期 ${today}</p>
+  </div>
+  <hr class="paper-rule" />
 ${body}
 </body>
 </html>`;
@@ -1033,6 +1119,12 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("detail-tags").addEventListener("click", (e) => {
     const btn = e.target.closest(".tag-del-btn");
     if (btn) removeTag(btn.dataset.tag);
+  });
+
+  // 导出列表：点题目内容打开详情（checkbox 独立勾选）
+  document.getElementById("export-container").addEventListener("click", (e) => {
+    const body = e.target.closest(".export-body[data-id]");
+    if (body) showProblemDetail(Number(body.dataset.id));
   });
 
   // 错题本：按标签搜索（防抖 300ms）

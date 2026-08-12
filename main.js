@@ -178,8 +178,18 @@ async function handleExportPdf(_event, payload) {
     await printWin.loadURL(
       "data:text/html;charset=utf-8," + encodeURIComponent(html)
     );
-    // 等待 KaTeX auto-render（defer 脚本）执行完
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    // 轮询页面里的渲染完成标记（页面调完 renderMathInElement 后置位），
+    // 最多等 5 秒；之后等公式字体加载完毕，避免 PDF 里缺字体。
+    for (let i = 0; i < 50; i++) {
+      const done = await printWin.webContents.executeJavaScript(
+        "window.__pdfRendered === true"
+      );
+      if (done) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    await printWin.webContents.executeJavaScript(
+      "document.fonts.ready.then(() => true)"
+    );
     const pdf = await printWin.webContents.printToPDF({
       pageSize: "A4",
       printBackground: true,
