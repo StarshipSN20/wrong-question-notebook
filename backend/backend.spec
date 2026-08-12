@@ -19,7 +19,9 @@ hiddenimports = collect_submodules("uvicorn")
 # conda 构建的 Python：标准库与扩展模块（_ctypes / _sqlite3 / _ssl 等）依赖
 # conda Library\\bin 下的 DLL，PyInstaller 常常漏收集，运行时报
 # "DLL load failed while importing xxx"。下面按 pefile 扫描出的清单收集。
+# （macOS 不需要；binaries/datas 必须在此初始化，供各平台共用。）
 binaries = []
+datas = []
 if sys.platform == "win32":
     conda_bases = [
         os.environ.get("CONDA_PREFIX", ""),
@@ -56,7 +58,6 @@ if sys.platform == "win32":
         print(f"[backend.spec] 已附带 conda DLL: {[os.path.basename(p) for p in found]}")
     # 注意：sqlite3.dll 会被 PyInstaller 的 hook 收集逻辑从 binaries 中去重掉，
     # 导致 pkg 里缺失。故改走 datas + 运行时 os.add_dll_directory(_MEIPASS)。
-    datas = []
     for base in conda_bases:
         if not base:
             continue
