@@ -19,26 +19,43 @@ let backendProcess = null;
 let mainWindow = null;
 let reminderTimer = null;
 
-// 解析虚拟环境中的 Python 解释器路径（Windows 优先，其他平台兜底）。
-function resolvePythonExecutable() {
+// 解析后端启动方式：
+// - 生产（app.isPackaged）：extraResources 里 PyInstaller 打包好的单文件后端。
+// - 开发：虚拟环境中的 Python 解释器 + backend/main.py（Windows 优先，其他平台兜底）。
+function resolveBackendLaunch() {
+  if (app.isPackaged) {
+    const exeName =
+      process.platform === "win32" ? "mistake-backend.exe" : "mistake-backend";
+    const exePath = path.join(process.resourcesPath, "backend", exeName);
+    if (fs.existsSync(exePath)) {
+      return { executable: exePath, args: [], cwd: path.dirname(exePath) };
+    }
+    console.error(`[backend] 未找到打包后端: ${exePath}，退回开发模式`);
+  }
   const venvWin = path.join(__dirname, "backend", "venv", "Scripts", "python.exe");
   const venvUnix = path.join(__dirname, "backend", "venv", "bin", "python3");
-  if (require("fs").existsSync(venvWin)) return venvWin;
-  if (require("fs").existsSync(venvUnix)) return venvUnix;
-  // 未创建虚拟环境时，退回系统 python（Windows 通常为 python，其它为 python3）。
-  return process.platform === "win32" ? "python" : "python3";
+  const python = fs.existsSync(venvWin)
+    ? venvWin
+    : fs.existsSync(venvUnix)
+      ? venvUnix
+      : process.platform === "win32"
+        ? "python"
+        : "python3";
+  return {
+    executable: python,
+    args: [path.join(__dirname, "backend", "main.py")],
+    cwd: path.join(__dirname, "backend"),
+  };
 }
 
-// 启动 Python 后端子进程。
+// 启动后端进程（开发=Python 解释器跑 main.py；生产=打包好的后端可执行文件）。
 function startBackend() {
-  const python = resolvePythonExecutable();
-  const scriptPath = path.join(__dirname, "backend", "main.py");
-  const cwd = path.join(__dirname, "backend");
+  const launch = resolveBackendLaunch();
 
   // 统一数据目录：把 Electron 的 userData 目录传给后端，
   // 后端的 SQLite 与后续 uploads 都落在这里（禁止硬编码 ./data）。
-  backendProcess = spawn(python, [scriptPath], {
-    cwd,
+  backendProcess = spawn(launch.executable, launch.args, {
+    cwd: launch.cwd,
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, USER_DATA: app.getPath("userData") },
   });
@@ -170,14 +187,19 @@ async function handleExportPdf(_event, payload) {
   });
   if (canceled || !filePath) return { canceled: true };
 
+  // 打印页面以 file:// 加载（能引用本地 KaTeX vendor）；data URL 无法加载 file 资源。
+  const printHtmlPath = path.join(
+    app.getPath("temp"),
+    `mistakes-${Date.now()}-${Math.round(Math.random() * 1e6)}.html`
+  );
+  fs.writeFileSync(printHtmlPath, html, "utf-8");
+
   const printWin = new BrowserWindow({
     show: false,
     webPreferences: { sandbox: true },
   });
   try {
-    await printWin.loadURL(
-      "data:text/html;charset=utf-8," + encodeURIComponent(html)
-    );
+    await printWin.loadFile(printHtmlPath);
     // 轮询页面里的渲染完成标记（页面调完 renderMathInElement 后置位），
     // 最多等 5 秒；之后等公式字体加载完毕，避免 PDF 里缺字体。
     for (let i = 0; i < 50; i++) {
@@ -198,6 +220,7 @@ async function handleExportPdf(_event, payload) {
     return { canceled: false, filePath };
   } finally {
     if (!printWin.isDestroyed()) printWin.destroy();
+    if (fs.existsSync(printHtmlPath)) fs.unlinkSync(printHtmlPath);
   }
 }
 

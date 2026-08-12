@@ -7,11 +7,18 @@
 import base64
 import hashlib
 import json
+import os
 import re
+import sys
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import List, Optional
+
+# PyInstaller 打包运行时：conda 扩展模块（_sqlite3 等）依赖的 DLL 在
+# 解压目录 _MEIPASS 里，需显式加入 DLL 搜索路径（见 backend.spec）。
+if getattr(sys, "frozen", False) and sys.platform == "win32":
+    os.add_dll_directory(sys._MEIPASS)
 
 import aiofiles
 import uvicorn

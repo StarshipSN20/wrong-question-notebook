@@ -775,14 +775,18 @@ function buildPdfHtml(items) {
     body = items.map((item, i) => problemBlock(item, i + 1)).join("");
   }
 
+  // 本地 KaTeX（打包后离线可用）。主窗口是 file:// 页面，据此算出
+  // vendor 的绝对路径，打印窗口以 file:// 加载（主进程写临时文件）。
+  const katexBase = new URL("vendor/katex/", window.location.href).href;
+
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
 <title>数理化错题本导出</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
-<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+<link rel="stylesheet" href="${katexBase}katex.min.css" />
+<script src="${katexBase}katex.min.js"></script>
+<script defer src="${katexBase}auto-render.min.js"></script>
 <script>
   // auto-render 脚本只定义函数不会自动渲染，必须显式调用。
   // defer 脚本在 DOMContentLoaded 前已执行，故在此注册 DOMContentLoaded。
