@@ -1,0 +1,52 @@
+# 在 GitHub Actions 的 macOS 服务器上构建 .dmg（无需本地 Mac）。
+# 使用方式：
+#   1. 把项目推到 GitHub 仓库
+#   2. 仓库 Actions 页 → 手动运行本 workflow（Workflow dispatch）
+#   3. 构建完成后在 Actions 运行记录里下载 mac-dmg 产物
+name: Build macOS dmg
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-latest
+    env:
+      # 不签名（无 Apple 开发者证书），跳过代码签名步骤
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install backend dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+
+      - name: Build backend with PyInstaller
+        run: |
+          cd backend
+          pyinstaller backend.spec --noconfirm
+          ls -la dist/
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Build dmg
+        run: npm run dist:mac
+
+      - name: Upload dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-dmg
+          path: release/*.dmg

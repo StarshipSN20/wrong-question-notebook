@@ -27,6 +27,30 @@
    npm run dist:mac    # macOS（需装 node/npm/electron 依赖）
    ```
 
+## macOS 的两种构建方式
+
+**方式一：有一台 Mac**（任何 Mac 都行，借一台也可以）
+把项目拷过去，装好 Node.js 与 Python 3，然后按上面的两步执行即可：
+```bash
+cd backend && pip install -r requirements.txt pyinstaller && pyinstaller backend.spec --noconfirm
+cd .. && npm install && npm run dist:mac
+```
+产物在 `release/数理化错题本-0.1.0.dmg`。
+
+**方式二：没有 Mac**（用 GitHub Actions 免费 macOS 服务器，无需本地 Mac）
+项目已内置 `.github/workflows/build-mac.yml`：
+1. 在 GitHub 注册账号并新建一个仓库（设为 Private 即可）
+2. 把整个 `wrong-question-notebook` 项目推上去（命令见下面）
+3. 仓库的 **Actions** 页面 → 左侧选中 **Build macOS dmg** → 右侧 **Run workflow** → 运行
+4. 跑完后（约 10 分钟）在运行记录里下载 **mac-dmg** 产物，即 `.dmg` 安装包
+
+推送项目到 GitHub 的命令（首次）：
+```bash
+git remote add origin https://github.com/<你的用户名>/<仓库名>.git
+git branch -M main
+git push -u origin main
+```
+
 ## 注意事项
 
 - **macOS 上 PyInstaller 的 conda DLL 问题不存在**（mac 是 dylib 且 PyInstaller
