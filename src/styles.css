@@ -13,20 +13,6 @@
   word-break: break-word;
 }
 
-/* 卡片正文多行截断（Tailwind line-clamp 的兜底实现） */
-.line-clamp-3 {
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-.line-clamp-2 {
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
 /* 题目详情弹窗：点击遮罩关闭 */
 #detail-modal {
   transition: opacity 0.15s;
