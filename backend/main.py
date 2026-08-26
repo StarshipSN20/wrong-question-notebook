@@ -49,6 +49,15 @@ IMAGE_MIME = {
     ".bmp": "image/bmp",
 }
 
+# 语言一致性规则：AI 输出必须与题目原文同语言（英文题不要翻译成中文，反之亦然）。
+# 所有 AI 调用（识图 / 文本整理 / 生成答案 / 举一反三 / 修正）共用。
+LANGUAGE_RULE = (
+    "5. 【语言一致性】输出内容的语言必须与题目原文的语言完全一致："
+    "题目是英文就全程用英文（题干、解答、标签都用英文），"
+    "题目是中文就全程用中文；题目为其它语言时同样沿用该语言。"
+    "严禁把题目翻译成另一种语言，也严禁中英混杂。\n"
+)
+
 # 统一的格式规则：确保前端 KaTeX 能正确渲染，且多题不会挤在一起。
 FORMAT_RULES = (
     "严格遵守以下格式规则：\n"
@@ -57,6 +66,7 @@ FORMAT_RULES = (
     "2. 如果内容里有多道题，每道题各占一段，题与题之间用换行符 \\n 分隔，并在每题开头标注序号（如 1.、2.、3.）。\n"
     "3. latex_code 是 JSON 字符串，LaTeX 里的反斜杠必须按 JSON 规则转义（例如 \\\\frac 写成 \\\\\\\\frac）。\n"
     "4. 只返回一个 JSON 对象，不要输出任何解释、前后缀或 Markdown 代码块标记。\n"
+    + LANGUAGE_RULE
 )
 
 # JSON 字段说明（OCR 与文本整理共用）。
@@ -65,8 +75,12 @@ JSON_SPEC = (
     '{"subject": "数学/物理/化学 之一", '
     '"latex_code": "题目内容（遵守上述格式规则）", '
     '"raw_text": "题目的纯文本形式", '
-    '"tags": ["知识点标签1", "知识点标签2"], '
+    '"tags": ["知识点标签1", "知识点标签2", "知识点标签3"], '
     '"answer_latex": "题目的解答/答案（遵守上述格式规则；若原图或原文中没有解答，则输出空字符串 \\"\\"）"}'
+    "\n"
+    "tags 字段是必填项，不得为空数组：必须为每道题给出 2-4 个具体的知识点标签"
+    "（例如「二次函数」「数列递推」「牛顿第二定律」「氧化还原反应」这种细分知识点，"
+    "而不是「数学」「物理」这类学科名）。标签语言与题目语言保持一致。\n"
 )
 
 OCR_PROMPT = (
@@ -103,6 +117,14 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
+# 统一的查询列：附带 seq —— 按 id 升序的连续序号。
+# 用子查询（COUNT id <= 自身）而不是 rowid，保证删除错题后序号依然连续，
+# 前端展示 seq、接口调用仍用 id。
+SELECT_COLS = (
+    "p.*, (SELECT COUNT(*) FROM problems q WHERE q.id <= p.id) AS seq"
+)
+
+
 def _split_q_a(content: str) -> tuple[str, Optional[str]]:
     """把「【题目】…【解答】…」的内容拆成（题目, 答案）。
 
@@ -132,8 +154,10 @@ def _row_to_problem(row) -> ProblemOut:
         tags = []
     question, split_answer = _split_q_a(row["latex_code"] or row["raw_text"] or "")
     answer = row["answer_latex"] or split_answer
+    keys = row.keys()
     return ProblemOut(
         id=row["id"],
+        seq=row["seq"] if "seq" in keys else 0,
         image_path=row["image_path"],
         raw_text=row["raw_text"],
         latex_code=row["latex_code"],
@@ -152,9 +176,9 @@ def _row_to_problem(row) -> ProblemOut:
 
 
 def _fetch_problem(conn, problem_id: int):
-    """按 id 查一条错题，返回 sqlite3.Row 或 None。"""
+    """按 id 查一条错题（含 seq 连续序号），返回 sqlite3.Row 或 None。"""
     return conn.execute(
-        "SELECT * FROM problems WHERE id = ?", (problem_id,)
+        f"SELECT {SELECT_COLS} FROM problems p WHERE p.id = ?", (problem_id,)
     ).fetchone()
 
 
@@ -303,7 +327,9 @@ def list_problems() -> List[ProblemOut]:
     """获取错题列表（按创建时间倒序）。"""
     conn = database.get_connection()
     try:
-        rows = conn.execute("SELECT * FROM problems ORDER BY id DESC").fetchall()
+        rows = conn.execute(
+            f"SELECT {SELECT_COLS} FROM problems p ORDER BY p.id DESC"
+        ).fetchall()
     finally:
         conn.close()
     return [_row_to_problem(row) for row in rows]
@@ -385,6 +411,10 @@ def delete_problem(problem_id: int) -> Response:
             raise HTTPException(status_code=404, detail="错题不存在")
         image_path = row["image_path"]
         conn.execute("DELETE FROM problems WHERE id = ?", (problem_id,))
+        # 全部删空时重置自增计数器，下次录入从 id=1 重新开始（避免 id 无限增长）。
+        remaining = conn.execute("SELECT COUNT(*) FROM problems").fetchone()[0]
+        if remaining == 0:
+            conn.execute("DELETE FROM sqlite_sequence WHERE name = 'problems'")
         conn.commit()
     finally:
         conn.close()
@@ -436,7 +466,8 @@ async def upload_problem(file: UploadFile = File(...)) -> ProblemOut:
     conn = database.get_connection()
     try:
         existing = conn.execute(
-            "SELECT * FROM problems WHERE raw_image_hash = ?", (file_hash,)
+            f"SELECT {SELECT_COLS} FROM problems p WHERE p.raw_image_hash = ?",
+            (file_hash,),
         ).fetchone()
     finally:
         conn.close()
@@ -505,6 +536,7 @@ async def correct_latex(req: CorrectLatexRequest) -> ProblemOut:
         "你是一个 LaTeX 题目修正助手。下面是当前题目的 LaTeX 代码，请根据用户的修改要求"
         "输出修正后的完整 LaTeX 代码。\n"
         "公式一律用 \\( \\) 包裹行内、\\[ \\] 包裹行间，禁止使用 $ 或 $$；多道题之间用换行符分隔。\n"
+        "【语言一致性】修正后的内容必须与原题语言保持一致，不要翻译成其它语言。\n"
         "只返回修正后的 LaTeX 代码本身，不要任何解释，不要 Markdown 代码块标记。\n\n"
         f"当前 LaTeX：\n{current_latex}\n\n"
         f"用户修改要求：{req.user_feedback}"
@@ -662,10 +694,10 @@ def review_due() -> List[ProblemOut]:
     conn = database.get_connection()
     try:
         rows = conn.execute(
-            """
-            SELECT * FROM problems
-            WHERE next_review_date <= ? AND review_stage < ?
-            ORDER BY next_review_date, id
+            f"""
+            SELECT {SELECT_COLS} FROM problems p
+            WHERE p.next_review_date <= ? AND p.review_stage < ?
+            ORDER BY p.next_review_date, p.id
             """,
             (today, max_stage),
         ).fetchall()

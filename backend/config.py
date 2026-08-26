@@ -4,9 +4,11 @@
 uploads 同处一个跨平台用户数据目录，禁止硬编码绝对路径）。
 
 存储字段（兼容 OpenAI 规范的 API，如 Qwen-VL / Claude / DeepSeek）：
-- api_key    ：接口密钥
-- base_url   ：接口 Endpoint（如 https://api.openai.com/v1）
-- model_name ：模型名（需具备多模态 vision 能力才能识图）
+- api_key          ：接口密钥
+- base_url         ：接口 Endpoint（如 https://api.openai.com/v1）
+- model_name       ：模型名（需具备多模态 vision 能力才能识图）
+- reasoning_effort ：推理强度（minimal/low/medium/high，或 auto=不发送该参数）
+- ui_language      ：界面语言（zh/en），仅前端使用
 """
 
 import json
@@ -18,6 +20,10 @@ DEFAULT_CONFIG = {
     "api_key": "",
     "base_url": "",
     "model_name": "",
+    # 各家模型支持的档位不一致，"auto" 表示不发送该参数（交由模型默认值）。
+    # 默认 high：用户未特别指定时优先保证识题/解题质量。
+    "reasoning_effort": "high",
+    "ui_language": "zh",
 }
 
 

@@ -27,6 +27,9 @@ class ProblemOut(BaseModel):
     """
 
     id: int
+    # seq：按 id 升序的连续序号（1,2,3…）。删除错题后不留空号，
+    # 供前端展示；id 仍是数据库主键，用于接口调用。
+    seq: int = 0
     image_path: Optional[str] = None
     raw_text: Optional[str] = None
     latex_code: Optional[str] = None
@@ -54,11 +57,15 @@ class ProblemUpdate(BaseModel):
 
 
 class ConfigModel(BaseModel):
-    """AI 接口配置（读写「设置」页）。"""
+    """AI 接口配置与界面偏好（读写「设置」页）。"""
 
     api_key: str = ""
     base_url: str = ""
     model_name: str = ""
+    # 推理强度：minimal / low / medium / high / auto（auto=不发送该参数）
+    reasoning_effort: str = "high"
+    # 界面语言：zh / en
+    ui_language: str = "zh"
 
 
 class CorrectLatexRequest(BaseModel):

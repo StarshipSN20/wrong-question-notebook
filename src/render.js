@@ -2,14 +2,19 @@
 
 const API_BASE = "http://127.0.0.1:8000";
 
-const VIEW_TITLES = {
-  notebook: "错题本",
-  editor: "录入/编辑",
-  similar: "举一反三",
-  review: "复习计划",
-  export: "导出",
-  settings: "设置",
+// 视图 → 标题的 i18n key（标题随语言切换，见 i18n.js）。
+const VIEW_TITLE_KEYS = {
+  notebook: "nav.notebook",
+  editor: "nav.editor",
+  similar: "nav.similar",
+  review: "nav.review",
+  export: "nav.export",
+  settings: "nav.settings",
 };
+
+function viewTitle(view) {
+  return t(VIEW_TITLE_KEYS[view] || "nav.notebook");
+}
 
 // 学科对应的标签配色
 const SUBJECT_COLORS = {
@@ -28,6 +33,8 @@ const problemsCache = new Map();
 let detailProblem = null;
 // 错题本搜索关键字（按标签匹配）
 let searchQuery = "";
+// 当前视图（切换语言后据此重新渲染动态内容）
+let currentView = "notebook";
 
 function escapeHtml(value) {
   if (value === null || value === undefined) return "";
@@ -60,6 +67,13 @@ function renderLatex(element) {
 // ---------------------------------------------------------------------------
 // 错题本视图
 // ---------------------------------------------------------------------------
+// 「源自 #N」里的 N：优先显示父题的连续序号（seq），
+// 缓存里没有父题时退回其数据库 id。
+function parentSeq(parentId) {
+  const parent = problemsCache.get(parentId);
+  return parent && parent.seq ? parent.seq : parentId;
+}
+
 function renderCard(problem) {
   const subjectClass =
     SUBJECT_COLORS[problem.subject] || "bg-slate-100 text-slate-700";
@@ -74,11 +88,12 @@ function renderCard(problem) {
     .join(" ");
 
   // 预览只用题目部分；答案在详情弹窗里看
-  const content = problem.question_latex || problem.latex_code || problem.raw_text || "（无题目文本）";
+  const content =
+    problem.question_latex || problem.latex_code || problem.raw_text || t("card.noText");
 
   const generatedBadge = problem.is_generated
-    ? `<span class="inline-block px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">源自 #${escapeHtml(
-        problem.parent_id
+    ? `<span class="inline-block px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">${escapeHtml(
+        t("card.fromParent", { n: parentSeq(problem.parent_id) })
       )}</span>`
     : "";
 
@@ -88,15 +103,15 @@ function renderCard(problem) {
       <div class="flex items-center justify-between mb-2">
         <div class="flex items-center gap-2">
           <span class="inline-block px-2 py-0.5 text-xs rounded ${subjectClass}">${escapeHtml(
-    problem.subject || "未分类"
+    subjectLabel(problem.subject)
   )}</span>
           ${generatedBadge}
         </div>
         <div class="flex items-center gap-2">
-          <span class="text-xs text-slate-400">#${escapeHtml(problem.id)}</span>
+          <span class="text-xs text-slate-400">#${escapeHtml(problem.seq || problem.id)}</span>
           <button class="delete-btn text-slate-300 hover:text-red-500 text-sm leading-none" data-id="${escapeHtml(
             problem.id
-          )}" title="删除">✕</button>
+          )}" title="${escapeHtml(t("card.delete"))}">✕</button>
         </div>
       </div>
       <div class="latex-content text-sm text-slate-700 mb-3 line-clamp-3">${escapeHtml(
@@ -105,13 +120,19 @@ function renderCard(problem) {
       <div class="flex flex-wrap gap-1 mb-3">${tagsHtml}</div>
       <div class="flex items-center gap-2 mb-3">
         <button class="gen-btn px-2 py-1 text-xs bg-indigo-50 text-indigo-700 rounded hover:bg-indigo-100"
-                data-id="${escapeHtml(problem.id)}" data-type="变式">生成变式</button>
+                data-id="${escapeHtml(problem.id)}" data-type="变式">${escapeHtml(
+    t("card.genVariant")
+  )}</button>
         <button class="gen-btn px-2 py-1 text-xs bg-indigo-50 text-indigo-700 rounded hover:bg-indigo-100"
-                data-id="${escapeHtml(problem.id)}" data-type="拓展">生成拓展</button>
+                data-id="${escapeHtml(problem.id)}" data-type="拓展">${escapeHtml(
+    t("card.genExtend")
+  )}</button>
       </div>
       <div class="flex items-center justify-between text-xs text-slate-400 border-t border-slate-100 pt-2">
-        <span>下次复习：${escapeHtml(problem.next_review_date)}</span>
-        <span>阶段 ${escapeHtml(problem.review_stage)}/5</span>
+        <span>${escapeHtml(
+          t("card.nextReview", { date: problem.next_review_date })
+        )}</span>
+        <span>${escapeHtml(t("card.stage", { n: problem.review_stage }))}</span>
       </div>
     </article>
   `;
@@ -119,7 +140,9 @@ function renderCard(problem) {
 
 async function loadProblems() {
   const container = document.getElementById("problems-container");
-  container.innerHTML = `<p class="text-slate-400 col-span-full">加载中…</p>`;
+  container.innerHTML = `<p class="text-slate-400 col-span-full">${escapeHtml(
+    t("common.loading")
+  )}</p>`;
 
   try {
     const res = await fetch(`${API_BASE}/api/problems`);
@@ -139,10 +162,14 @@ async function loadProblems() {
     if (!problems.length) {
       container.innerHTML = `
         <div class="col-span-full text-center py-16 text-slate-400">
-          <p class="text-lg mb-1">${q ? "没有找到匹配的错题" : "还没有错题"}</p>
-          <p class="text-sm">${q
-            ? `没有题目带标签「${escapeHtml(searchQuery)}」。`
-            : "在「录入/编辑」中上传图片/PDF/DOCX 让 AI 识别，或用 POST /api/problems 手动新增。"}</p>
+          <p class="text-lg mb-1">${escapeHtml(
+            t(q ? "notebook.noMatchTitle" : "notebook.emptyTitle")
+          )}</p>
+          <p class="text-sm">${escapeHtml(
+            q
+              ? t("notebook.noMatchHint", { q: searchQuery })
+              : t("notebook.emptyHint")
+          )}</p>
         </div>`;
       return;
     }
@@ -154,24 +181,11 @@ async function loadProblems() {
   } catch (err) {
     container.innerHTML = `
       <div class="col-span-full text-center py-16 text-red-400">
-        <p class="text-lg mb-1">无法连接后端</p>
+        <p class="text-lg mb-1">${escapeHtml(t("notebook.offlineTitle"))}</p>
         <p class="text-sm">${escapeHtml(
-          err.message
-        )}（请确认 FastAPI 已启动于 ${API_BASE}）</p>
+          t("notebook.offlineHint", { msg: err.message, url: API_BASE })
+        )}</p>
       </div>`;
-  }
-}
-
-// 单题详情刷新：只更新缓存中对应题目，不刷新整个列表。
-async function refreshSingleProblem(id) {
-  try {
-    const res = await fetch(`${API_BASE}/api/problems/${id}`);
-    if (res.ok) {
-      const p = await res.json();
-      problemsCache.set(p.id, p);
-    }
-  } catch {
-    // 静默失败，缓存保持旧值
   }
 }
 
@@ -188,7 +202,7 @@ async function onCardClick(e) {
 }
 
 async function deleteProblem(id) {
-  if (!window.confirm("确定删除这道错题吗？此操作不可恢复。")) return;
+  if (!window.confirm(t("card.deleteConfirm"))) return;
   try {
     const res = await fetch(`${API_BASE}/api/problems/${id}`, {
       method: "DELETE",
@@ -200,7 +214,7 @@ async function deleteProblem(id) {
     problemsCache.delete(id);
     loadProblems();
   } catch (err) {
-    window.alert(`删除失败：${err.message}`);
+    window.alert(t("card.deleteFailed", { msg: err.message }));
   }
 }
 
@@ -219,19 +233,19 @@ function showProblemDetail(id) {
       problemsCache.set(p.id, p);
       renderDetail(p);
     })
-    .catch((err) => window.alert(`加载题目失败：${err.message}`));
+    .catch((err) => window.alert(t("detail.loadFailed", { msg: err.message })));
 }
 
 function renderDetail(p) {
   detailProblem = p;
-  document.getElementById("detail-subject").textContent = p.subject || "未分类";
+  document.getElementById("detail-subject").textContent = subjectLabel(p.subject);
   document.getElementById("detail-subject").className =
     `inline-block px-2 py-0.5 text-xs rounded ${SUBJECT_COLORS[p.subject] || "bg-slate-100 text-slate-700"}`;
-  document.getElementById("detail-id").textContent = `#${p.id}`;
+  document.getElementById("detail-id").textContent = `#${p.seq || p.id}`;
 
   const badge = document.getElementById("detail-badge");
   if (p.is_generated) {
-    badge.textContent = `源自 #${p.parent_id}`;
+    badge.textContent = t("card.fromParent", { n: parentSeq(p.parent_id) });
     badge.classList.remove("hidden");
   } else {
     badge.classList.add("hidden");
@@ -240,7 +254,7 @@ function renderDetail(p) {
   // 题目面板：只用题目部分
   const content = document.getElementById("detail-content");
   content.textContent =
-    p.question_latex || p.latex_code || p.raw_text || "（无题目文本）";
+    p.question_latex || p.latex_code || p.raw_text || t("card.noText");
   renderLatex(content);
 
   renderAnswerPanel();
@@ -283,11 +297,12 @@ function renderAnswerPanel() {
 function renderDetailTags() {
   const p = detailProblem;
   const tags = Array.isArray(p.tags) ? p.tags : [];
+  const delTitle = escapeHtml(t("detail.deleteTag"));
   document.getElementById("detail-tags").innerHTML = tags
     .map(
-      (t) => `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-slate-100 text-slate-600 rounded">
-        ${escapeHtml(t)}
-        <button class="tag-del-btn text-slate-400 hover:text-red-500" data-tag="${escapeHtml(t)}" title="删除标签">✕</button>
+      (tag) => `<span class="inline-flex items-center gap-1 px-2 py-0.5 text-xs bg-slate-100 text-slate-600 rounded">
+        ${escapeHtml(tag)}
+        <button class="tag-del-btn text-slate-400 hover:text-red-500" data-tag="${escapeHtml(tag)}" title="${delTitle}">✕</button>
       </span>`
     )
     .join("");
@@ -319,7 +334,7 @@ async function saveAnswer() {
   if (!detailProblem) return;
   const input = document.getElementById("answer-input");
   const status = document.getElementById("answer-status");
-  status.textContent = "保存中…";
+  status.textContent = t("editor.saving");
   try {
     const res = await fetch(`${API_BASE}/api/problems/${detailProblem.id}`, {
       method: "PATCH",
@@ -331,10 +346,10 @@ async function saveAnswer() {
     detailProblem = data;
     problemsCache.set(data.id, data);
     renderAnswerPanel();
-    status.textContent = "已保存 ✓";
+    status.textContent = t("settings.saved");
     status.className = "text-sm text-emerald-600";
   } catch (err) {
-    status.textContent = `保存失败：${err.message}`;
+    status.textContent = t("settings.saveFailed", { msg: err.message });
     status.className = "text-sm text-red-500";
   }
 }
@@ -346,8 +361,8 @@ async function generateAnswerByAI() {
   const btn = document.getElementById("answer-ai-btn");
   const original = btn.textContent;
   btn.disabled = true;
-  btn.textContent = "生成中…";
-  status.textContent = "AI 生成中，请稍候…";
+  btn.textContent = t("card.generating");
+  status.textContent = t("detail.aiGenerating");
   status.className = "text-sm text-slate-500";
   try {
     const res = await fetch(`${API_BASE}/api/generate-answer`, {
@@ -360,10 +375,10 @@ async function generateAnswerByAI() {
     detailProblem = data;
     problemsCache.set(data.id, data);
     renderAnswerPanel();
-    status.textContent = "已生成 ✓";
+    status.textContent = t("detail.aiGenerated");
     status.className = "text-sm text-emerald-600";
   } catch (err) {
-    status.textContent = `生成失败：${err.message}`;
+    status.textContent = t("detail.aiGenFailed", { msg: err.message });
     status.className = "text-sm text-red-500";
   } finally {
     btn.disabled = false;
@@ -380,11 +395,11 @@ async function addTag() {
   const status = document.getElementById("tag-status");
   const current = Array.isArray(detailProblem.tags) ? detailProblem.tags : [];
   if (current.includes(tag)) {
-    status.textContent = "该标签已存在";
+    status.textContent = t("detail.tagExists");
     status.className = "text-xs text-slate-400";
     return;
   }
-  status.textContent = "保存中…";
+  status.textContent = t("editor.saving");
   try {
     const res = await fetch(`${API_BASE}/api/problems/${detailProblem.id}`, {
       method: "PATCH",
@@ -397,10 +412,10 @@ async function addTag() {
     problemsCache.set(data.id, data);
     renderDetailTags();
     input.value = "";
-    status.textContent = "已添加 ✓";
+    status.textContent = t("detail.tagAdded");
     status.className = "text-xs text-emerald-600";
   } catch (err) {
-    status.textContent = `添加失败：${err.message}`;
+    status.textContent = t("detail.tagFailed", { msg: err.message });
     status.className = "text-xs text-red-500";
   }
 }
@@ -421,17 +436,19 @@ async function removeTag(tag) {
     problemsCache.set(data.id, data);
     renderDetailTags();
   } catch (err) {
-    window.alert(`删除标签失败：${err.message}`);
+    window.alert(t("detail.tagDelFailed", { msg: err.message }));
   }
 }
 
 // 生成变式/拓展题（举一反三）。
 async function generateSimilar(btn) {
   const id = btn.dataset.id;
+  // data-type 传给后端的值始终是中文（接口协议），界面文案另行翻译。
   const type = btn.dataset.type || "变式";
+  const typeLabel = t(type === "拓展" ? "type.extend" : "type.variant");
   const original = btn.textContent;
   btn.disabled = true;
-  btn.textContent = "生成中…";
+  btn.textContent = t("card.generating");
   try {
     const res = await fetch(`${API_BASE}/api/generate-similar`, {
       method: "POST",
@@ -440,10 +457,12 @@ async function generateSimilar(btn) {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-    window.alert(`已生成${type}题 #${data.id}，可在「错题本」或「举一反三」查看。`);
+    window.alert(
+      t("card.genDone", { type: typeLabel, n: data.seq || data.id })
+    );
     loadProblems();
   } catch (err) {
-    window.alert(`生成失败：${err.message}`);
+    window.alert(t("card.genFailed", { msg: err.message }));
   } finally {
     btn.disabled = false;
     btn.textContent = original;
@@ -452,13 +471,17 @@ async function generateSimilar(btn) {
 
 async function checkBackend() {
   const el = document.getElementById("backend-status");
+  // 状态文本由本函数动态写入，去掉 data-i18n 标记避免语言切换时被覆盖回「检测中」。
+  el.removeAttribute("data-i18n");
   try {
     const res = await fetch(`${API_BASE}/health`);
     const data = await res.json();
-    el.textContent = data.status === "ok" ? "后端：运行中 ●" : "后端：异常";
+    el.textContent = t(
+      data.status === "ok" ? "backend.running" : "backend.abnormal"
+    );
     el.className = "text-emerald-400";
   } catch {
-    el.textContent = "后端：未连接 ○";
+    el.textContent = t("backend.offline");
     el.className = "text-red-400";
   }
 }
@@ -467,11 +490,11 @@ async function checkBackend() {
 // 视图切换
 // ---------------------------------------------------------------------------
 function switchView(view) {
+  currentView = view;
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.view === view);
   });
-  document.getElementById("view-title").textContent =
-    VIEW_TITLES[view] || "错题本";
+  document.getElementById("view-title").textContent = viewTitle(view);
 
   // 刷新按钮只在错题本视图有意义
   document.getElementById("refresh-btn").classList.toggle(
@@ -499,11 +522,6 @@ function switchView(view) {
   } else if (view === "settings") {
     document.getElementById("view-settings").classList.remove("hidden");
     loadConfig();
-  } else {
-    const ph = document.getElementById("view-placeholder");
-    document.getElementById("placeholder-title").textContent =
-      `「${VIEW_TITLES[view]}」`;
-    ph.classList.remove("hidden");
   }
 }
 
@@ -512,7 +530,9 @@ function switchView(view) {
 // ---------------------------------------------------------------------------
 async function loadSimilar() {
   const container = document.getElementById("similar-container");
-  container.innerHTML = `<p class="text-slate-400 col-span-full">加载中…</p>`;
+  container.innerHTML = `<p class="text-slate-400 col-span-full">${escapeHtml(
+    t("common.loading")
+  )}</p>`;
   try {
     const res = await fetch(`${API_BASE}/api/problems`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -522,16 +542,16 @@ async function loadSimilar() {
     if (!generated.length) {
       container.innerHTML = `
         <div class="col-span-full text-center py-16 text-slate-400">
-          <p class="text-lg mb-1">还没有生成的题目</p>
-          <p class="text-sm">去「错题本」某道题上点「生成变式」或「生成拓展」。</p>
+          <p class="text-lg mb-1">${escapeHtml(t("similar.emptyTitle"))}</p>
+          <p class="text-sm">${escapeHtml(t("similar.emptyHint"))}</p>
         </div>`;
       return;
     }
     container.innerHTML = generated.map(renderCard).join("");
     renderLatex(container);
   } catch (err) {
-    container.innerHTML = `<p class="text-red-400 col-span-full">加载失败：${escapeHtml(
-      err.message
+    container.innerHTML = `<p class="text-red-400 col-span-full">${escapeHtml(
+      t("common.loadFailed", { msg: err.message })
     )}</p>`;
   }
 }
@@ -541,7 +561,9 @@ async function loadSimilar() {
 // ---------------------------------------------------------------------------
 async function loadReviewDue() {
   const container = document.getElementById("review-container");
-  container.innerHTML = `<p class="text-slate-400">加载中…</p>`;
+  container.innerHTML = `<p class="text-slate-400">${escapeHtml(
+    t("common.loading")
+  )}</p>`;
   try {
     const res = await fetch(`${API_BASE}/api/review/due`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -549,8 +571,8 @@ async function loadReviewDue() {
     if (!due.length) {
       container.innerHTML = `
         <div class="text-center py-16 text-slate-400">
-          <p class="text-lg mb-1">今天没有待复习的错题 🎉</p>
-          <p class="text-sm">新录入的错题会在次日进入复习计划。</p>
+          <p class="text-lg mb-1">${escapeHtml(t("review.emptyTitle"))}</p>
+          <p class="text-sm">${escapeHtml(t("review.emptyHint"))}</p>
         </div>`;
       return;
     }
@@ -558,29 +580,31 @@ async function loadReviewDue() {
     container.innerHTML = due
       .map((p) => {
         const content =
-          p.question_latex || p.latex_code || p.raw_text || "（无题目文本）";
+          p.question_latex || p.latex_code || p.raw_text || t("card.noText");
         return `
           <div class="review-item bg-white rounded-lg border border-slate-200 p-4 flex items-start justify-between gap-4 cursor-pointer hover:border-blue-300"
                data-id="${escapeHtml(p.id)}">
             <div class="min-w-0">
               <div class="text-xs text-slate-400 mb-1">#${escapeHtml(
-                p.id
-              )} · ${escapeHtml(p.subject || "未分类")} · 阶段 ${escapeHtml(
-          p.review_stage
-        )}/5</div>
+                p.seq || p.id
+              )} · ${escapeHtml(subjectLabel(p.subject))} · ${escapeHtml(
+          t("card.stage", { n: p.review_stage })
+        )}</div>
               <div class="latex-content text-sm text-slate-700 line-clamp-3">${escapeHtml(
                 content
               )}</div>
             </div>
             <button class="review-done-btn shrink-0 px-3 py-2 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700"
-                    data-id="${escapeHtml(p.id)}">标记为已复习</button>
+                    data-id="${escapeHtml(p.id)}">${escapeHtml(
+          t("review.markDone")
+        )}</button>
           </div>`;
       })
       .join("");
     renderLatex(container);
   } catch (err) {
-    container.innerHTML = `<p class="text-red-400">加载失败：${escapeHtml(
-      err.message
+    container.innerHTML = `<p class="text-red-400">${escapeHtml(
+      t("common.loadFailed", { msg: err.message })
     )}</p>`;
   }
 }
@@ -596,7 +620,7 @@ async function completeReview(id) {
     }
     loadReviewDue();
   } catch (err) {
-    window.alert(`操作失败：${err.message}`);
+    window.alert(t("review.opFailed", { msg: err.message }));
   }
 }
 
@@ -613,20 +637,24 @@ function onReviewClick(e) {
 // ---------------------------------------------------------------------------
 async function loadExportList() {
   const container = document.getElementById("export-container");
-  container.innerHTML = `<p class="text-slate-400">加载中…</p>`;
+  container.innerHTML = `<p class="text-slate-400">${escapeHtml(
+    t("common.loading")
+  )}</p>`;
   try {
     const res = await fetch(`${API_BASE}/api/problems`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const problems = await res.json();
     if (!problems.length) {
-      container.innerHTML = `<p class="text-slate-400 text-center py-16">还没有错题可导出。</p>`;
+      container.innerHTML = `<p class="text-slate-400 text-center py-16">${escapeHtml(
+        t("export.emptyHint")
+      )}</p>`;
       return;
     }
     problems.forEach((p) => problemsCache.set(p.id, p));
     container.innerHTML = problems
       .map((p) => {
         const content =
-          p.question_latex || p.latex_code || p.raw_text || "（无题目文本）";
+          p.question_latex || p.latex_code || p.raw_text || t("card.noText");
         return `
           <div class="export-item flex items-start gap-3 bg-white rounded-lg border border-slate-200 p-3 cursor-pointer">
             <input type="checkbox" class="export-cb mt-1" value="${escapeHtml(
@@ -634,8 +662,8 @@ async function loadExportList() {
             )}" />
             <div class="export-body min-w-0 flex-1" data-id="${escapeHtml(p.id)}">
               <div class="text-xs text-slate-400 mb-1">#${escapeHtml(
-                p.id
-              )} · ${escapeHtml(p.subject || "未分类")}</div>
+                p.seq || p.id
+              )} · ${escapeHtml(subjectLabel(p.subject))}</div>
               <div class="latex-content text-sm text-slate-700 line-clamp-2">${escapeHtml(
                 content
               )}</div>
@@ -645,8 +673,8 @@ async function loadExportList() {
       .join("");
     renderLatex(container);
   } catch (err) {
-    container.innerHTML = `<p class="text-red-400">加载失败：${escapeHtml(
-      err.message
+    container.innerHTML = `<p class="text-red-400">${escapeHtml(
+      t("common.loadFailed", { msg: err.message })
     )}</p>`;
   }
 }
@@ -666,7 +694,7 @@ async function exportSelected() {
     document.querySelectorAll("#export-container .export-cb:checked")
   ).map((cb) => Number(cb.value));
   if (!ids.length) {
-    window.alert("请先勾选要导出的错题。");
+    window.alert(t("export.selectFirst"));
     return;
   }
   const btn = document.getElementById("export-btn");
@@ -675,7 +703,12 @@ async function exportSelected() {
     const res = await fetch(`${API_BASE}/api/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ problem_ids: ids, ...getExportVersion() }),
+      body: JSON.stringify({
+        problem_ids: ids,
+        ...getExportVersion(),
+        // .tex 卷头语言跟随界面，避免英文界面导出中文卷头
+        language: getLanguage(),
+      }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
@@ -691,7 +724,7 @@ async function exportSelected() {
     a.remove();
     URL.revokeObjectURL(url);
   } catch (err) {
-    window.alert(`导出失败：${err.message}`);
+    window.alert(t("export.failed", { msg: err.message }));
   } finally {
     btn.disabled = false;
   }
@@ -703,7 +736,7 @@ async function exportPDF() {
     document.querySelectorAll("#export-container .export-cb:checked")
   ).map((cb) => Number(cb.value));
   if (!checked.length) {
-    window.alert("请先勾选要导出的错题。");
+    window.alert(t("export.selectFirst"));
     return;
   }
   const items = checked
@@ -711,12 +744,13 @@ async function exportPDF() {
     .filter(Boolean)
     .map((p) => ({
       id: p.id,
-      subject: p.subject || "未分类",
-      question: p.question_latex || p.latex_code || p.raw_text || "（无内容）",
+      subject: subjectLabel(p.subject),
+      question:
+        p.question_latex || p.latex_code || p.raw_text || t("pdf.noContent"),
       answer: p.answer_latex || "",
     }));
   if (!items.length) {
-    window.alert("所选错题数据未加载，请刷新后重试。");
+    window.alert(t("export.notLoaded"));
     return;
   }
 
@@ -724,17 +758,17 @@ async function exportPDF() {
   btn.disabled = true;
   try {
     if (!window.pdfApi || typeof window.pdfApi.exportPdf !== "function") {
-      throw new Error("当前环境不支持 PDF 导出（需通过 Electron 运行）");
+      throw new Error(t("export.pdfUnsupported"));
     }
     const result = await window.pdfApi.exportPdf({
       html: buildPdfHtml(items),
       suggestedName: "mistakes.pdf",
     });
     if (!result.canceled) {
-      window.alert(`PDF 已导出：${result.filePath}`);
+      window.alert(t("export.pdfSaved", { path: result.filePath }));
     }
   } catch (err) {
-    window.alert(`导出 PDF 失败：${err.message}`);
+    window.alert(t("export.pdfFailed", { msg: err.message }));
   } finally {
     btn.disabled = false;
   }
@@ -751,11 +785,15 @@ function buildPdfHtml(items) {
     const q = escapeHtml(item.question);
     const a = escapeHtml(item.answer);
     const withAnswer = include_answers && !answers_last && a;
+    const title = escapeHtml(
+      t("pdf.problemNo", { n: num, subject: item.subject })
+    );
+    const answerLabel = escapeHtml(t("pdf.answerLabel"));
     return `
       <div class="problem">
-        <div class="p-title">第 ${num} 题（${escapeHtml(item.subject)}）</div>
+        <div class="p-title">${title}</div>
         <div class="p-body">${q}</div>
-        ${withAnswer ? `<div class="p-answer"><div class="p-answer-label">【答案】</div><div>${a}</div></div>` : ""}
+        ${withAnswer ? `<div class="p-answer"><div class="p-answer-label">${answerLabel}</div><div>${a}</div></div>` : ""}
       </div>`;
   };
 
@@ -763,12 +801,14 @@ function buildPdfHtml(items) {
   if (answers_last && include_answers) {
     // 答案在最后：题目区 + 参考答案区（参考答案另起一页）
     body = items.map((item, i) => problemBlock(item, i + 1)).join("");
-    body += `<div class="answers-section"><h2>参考答案</h2>`;
+    body += `<div class="answers-section"><h2>${escapeHtml(
+      t("pdf.refAnswers")
+    )}</h2>`;
     items.forEach((item, i) => {
       const a = escapeHtml(item.answer);
-      body += `<div class="problem"><div class="p-title">第 ${i + 1} 题</div><div class="p-body">${
-        a || "（无答案）"
-      }</div></div>`;
+      body += `<div class="problem"><div class="p-title">${escapeHtml(
+        t("pdf.problemN", { n: i + 1 })
+      )}</div><div class="p-body">${a || escapeHtml(t("pdf.noAnswer"))}</div></div>`;
     });
     body += `</div>`;
   } else {
@@ -783,7 +823,7 @@ function buildPdfHtml(items) {
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
-<title>数理化错题本导出</title>
+<title>${escapeHtml(t("pdf.title"))}</title>
 <link rel="stylesheet" href="${katexBase}katex.min.css" />
 <script src="${katexBase}katex.min.js"></script>
 <script defer src="${katexBase}auto-render.min.js"></script>
@@ -872,8 +912,10 @@ function buildPdfHtml(items) {
 </head>
 <body>
   <div class="paper-head">
-    <h1>错题本 · 复习卷</h1>
-    <p class="paper-meta">共 ${count} 题 · 导出日期 ${today}</p>
+    <h1>${escapeHtml(t("pdf.title"))}</h1>
+    <p class="paper-meta">${escapeHtml(
+      t("pdf.meta", { n: count, date: today })
+    )}</p>
   </div>
   <hr class="paper-rule" />
 ${body}
@@ -893,12 +935,16 @@ function setEditorStatus(msg, isError = false) {
 function showResult(problem) {
   currentProblem = problem;
   document.getElementById("result-area").classList.remove("hidden");
-  document.getElementById("result-subject").textContent =
-    problem.subject || "未分类";
-  document.getElementById("result-id").textContent = `#${problem.id}`;
+  document.getElementById("result-subject").textContent = subjectLabel(
+    problem.subject
+  );
+  document.getElementById("result-id").textContent = `#${
+    problem.seq || problem.id
+  }`;
 
   const render = document.getElementById("result-render");
-  render.textContent = problem.latex_code || problem.raw_text || "（空）";
+  render.textContent =
+    problem.latex_code || problem.raw_text || t("editor.empty");
   renderLatex(render);
 
   document.getElementById("latex-textarea").value = problem.latex_code || "";
@@ -930,7 +976,7 @@ function handleFileSelected(file) {
 
 async function recognizeFile() {
   if (!pendingFile) return;
-  setEditorStatus("识别中，请稍候…");
+  setEditorStatus(t("editor.recognizing"));
   document.getElementById("recognize-btn").disabled = true;
 
   const form = new FormData();
@@ -944,7 +990,7 @@ async function recognizeFile() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     showResult(data);
-    setEditorStatus("识别完成 ✓");
+    setEditorStatus(t("editor.recognized"));
   } catch (err) {
     setEditorStatus(err.message, true);
   } finally {
@@ -958,7 +1004,7 @@ async function submitCorrection() {
   const feedback = input.value.trim();
   if (!feedback) return;
 
-  setEditorStatus("AI 修正中…");
+  setEditorStatus(t("editor.correcting"));
   try {
     const res = await fetch(`${API_BASE}/api/correct-latex`, {
       method: "POST",
@@ -972,7 +1018,7 @@ async function submitCorrection() {
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     showResult(data);
     input.value = "";
-    setEditorStatus("修正完成 ✓");
+    setEditorStatus(t("editor.corrected"));
   } catch (err) {
     setEditorStatus(err.message, true);
   }
@@ -982,7 +1028,7 @@ async function updateLatex() {
   if (!currentProblem) return;
   const latex = document.getElementById("latex-textarea").value;
 
-  setEditorStatus("保存中…");
+  setEditorStatus(t("editor.saving"));
   try {
     const res = await fetch(`${API_BASE}/api/problems/${currentProblem.id}`, {
       method: "PATCH",
@@ -992,7 +1038,7 @@ async function updateLatex() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     showResult(data);
-    setEditorStatus("已更新 ✓");
+    setEditorStatus(t("editor.updated"));
   } catch (err) {
     setEditorStatus(err.message, true);
   }
@@ -1010,8 +1056,13 @@ async function loadConfig() {
     document.getElementById("cfg-api-key").value = cfg.api_key || "";
     document.getElementById("cfg-base-url").value = cfg.base_url || "";
     document.getElementById("cfg-model-name").value = cfg.model_name || "";
+    document.getElementById("cfg-reasoning-effort").value =
+      cfg.reasoning_effort || "high";
+    // 界面语言以本地生效的值为准（localStorage 已在 i18n.js 中读取），
+    // 避免后端配置与当前界面不一致时下拉框显示错位。
+    document.getElementById("cfg-ui-language").value = getLanguage();
   } catch (err) {
-    status.textContent = `读取配置失败：${err.message}`;
+    status.textContent = t("settings.loadFailed", { msg: err.message });
     status.className = "text-sm text-red-500";
   }
 }
@@ -1022,8 +1073,10 @@ async function saveConfig() {
     api_key: document.getElementById("cfg-api-key").value,
     base_url: document.getElementById("cfg-base-url").value,
     model_name: document.getElementById("cfg-model-name").value,
+    reasoning_effort: document.getElementById("cfg-reasoning-effort").value,
+    ui_language: document.getElementById("cfg-ui-language").value,
   };
-  status.textContent = "保存中…";
+  status.textContent = t("editor.saving");
   status.className = "text-sm text-slate-500";
   try {
     const res = await fetch(`${API_BASE}/api/config`, {
@@ -1032,10 +1085,10 @@ async function saveConfig() {
       body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    status.textContent = "已保存 ✓";
+    status.textContent = t("settings.saved");
     status.className = "text-sm text-emerald-600";
   } catch (err) {
-    status.textContent = `保存失败：${err.message}`;
+    status.textContent = t("settings.saveFailed", { msg: err.message });
     status.className = "text-sm text-red-500";
   }
 }
@@ -1078,7 +1131,47 @@ function bindEditorEvents() {
     .addEventListener("click", updateLatex);
 }
 
+// 切换界面语言：刷新静态文本 + 重渲染当前视图的动态内容，
+// 并把选择写回后端 config.json（主进程的系统通知文案复用同一份配置）。
+async function changeLanguage(lang) {
+  setLanguage(lang);
+
+  // 标题、侧栏后端状态等由 JS 动态写入，需重新生成一遍。
+  document.getElementById("view-title").textContent = viewTitle(currentView);
+  checkBackend();
+  const langSelect = document.getElementById("cfg-ui-language");
+  if (langSelect) langSelect.value = getLanguage();
+
+  // 重渲染当前视图（卡片、列表里的文案与学科名都随语言变）。
+  if (currentView === "notebook") loadProblems();
+  else if (currentView === "similar") loadSimilar();
+  else if (currentView === "review") loadReviewDue();
+  else if (currentView === "export") loadExportList();
+
+  // 详情弹窗若开着，一并重渲染。
+  const modal = document.getElementById("detail-modal");
+  if (detailProblem && modal && !modal.classList.contains("hidden")) {
+    renderDetail(detailProblem);
+  }
+
+  // 持久化到后端（失败不影响界面，语言已存 localStorage）。
+  try {
+    const res = await fetch(`${API_BASE}/api/config`);
+    const cfg = await res.json();
+    await fetch(`${API_BASE}/api/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...cfg, ui_language: getLanguage() }),
+    });
+  } catch {
+    /* 后端不可用时忽略：界面语言已生效，下次保存配置时会补写 */
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
+  // 先按已存语言刷新一遍静态文本（i18n.js 已从 localStorage 读出语言）。
+  applyStaticTranslations();
+
   document.querySelectorAll(".nav-item").forEach((btn) => {
     btn.addEventListener("click", () => switchView(btn.dataset.view));
   });
@@ -1096,6 +1189,11 @@ document.addEventListener("DOMContentLoaded", () => {
   document
     .getElementById("save-config-btn")
     .addEventListener("click", saveConfig);
+
+  // 界面语言下拉框：选中即时生效（无需点保存）
+  const langSelect = document.getElementById("cfg-ui-language");
+  langSelect.value = getLanguage();
+  langSelect.addEventListener("change", (e) => changeLanguage(e.target.value));
 
   // 详情弹窗关闭方式
   document.getElementById("detail-close-btn").addEventListener("click", closeDetailModal);
@@ -1145,6 +1243,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("export-pdf-btn").addEventListener("click", exportPDF);
 
   bindEditorEvents();
+  // 初始标题按当前语言（HTML 里的中文只是首屏占位）
+  document.getElementById("view-title").textContent = viewTitle(currentView);
   checkBackend();
   loadProblems();
 });

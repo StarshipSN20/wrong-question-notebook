@@ -3,11 +3,25 @@
 // 2. 轮询 /health，后端就绪后创建 1024x768 窗口加载前端。
 // 3. 应用退出时干净地杀掉 Python 子进程，防止残留。
 
-const { app, BrowserWindow, Notification, ipcMain, dialog } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  Menu,
+  Notification,
+  ipcMain,
+  dialog,
+} = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const http = require("http");
+
+// 用户数据目录固定为 ASCII 名（不随 productName 变化）：
+// productName 用于安装目录与快捷方式显示，若它含非 ASCII 字符，
+// Electron 默认的 userData 路径也会带非 ASCII，给 Python 子进程和
+// 备份脚本带来编码麻烦。这里显式钉死，保证开发/打包共用同一目录。
+const USER_DATA_DIR_NAME = "wrong-question-notebook";
+app.setPath("userData", path.join(app.getPath("appData"), USER_DATA_DIR_NAME));
 
 const BACKEND_HOST = "127.0.0.1";
 const BACKEND_PORT = 8000;
@@ -124,15 +138,29 @@ function fetchDueCount() {
   });
 }
 
+// 读取界面语言（与前端「设置」页共用 config.json），供通知文案使用。
+function readUiLanguage() {
+  try {
+    const cfgPath = path.join(app.getPath("userData"), "config.json");
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+    return cfg.ui_language === "en" ? "en" : "zh";
+  } catch {
+    return "zh";
+  }
+}
+
 // 弹出艾宾浩斯复习提醒（若当天有待复习题目）。
 async function checkReviewReminders() {
   if (!Notification.isSupported()) return;
   const count = await fetchDueCount();
   if (count <= 0) return;
 
+  const zh = readUiLanguage() === "zh";
   const notification = new Notification({
-    title: "复习提醒",
-    body: `今天有 ${count} 道错题待复习，点击打开错题本。`,
+    title: zh ? "复习提醒" : "Review reminder",
+    body: zh
+      ? `今天有 ${count} 道错题待复习，点击打开错题本。`
+      : `${count} problem(s) due for review today. Click to open.`,
   });
   notification.on("click", () => {
     if (mainWindow) {
@@ -236,6 +264,10 @@ function stopBackend() {
 app.whenReady().then(async () => {
   // Windows 通知需要一个稳定的 AppUserModelID，否则通知可能不显示。
   app.setAppUserModelId("com.mistakenotebook.app");
+  // 移除 Electron 默认菜单栏（File / Edit / View / Window / Help）。
+  // 应用自带侧边栏导航，系统菜单是多余的。注意：这会同时禁用
+  // 默认快捷键（如 Ctrl+R 刷新、F12 开发者工具）。
+  Menu.setApplicationMenu(null);
   ipcMain.handle("export-pdf", handleExportPdf);
 
   startBackend();

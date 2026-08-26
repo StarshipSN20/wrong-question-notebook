@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>数理化错题本</title>
+  <!-- 界面多语言字典（须在 render.js 之前加载） -->
+  <script src="i18n.js"></script>
   <!-- Tailwind CSS 通过 CDN 引入，零构建 -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- KaTeX：公式渲染 + 自动扫描 \( \) \[ \]（本地 vendor，离线可用） -->
@@ -18,33 +20,33 @@
   <div class="flex h-full">
     <!-- 左侧导航栏 -->
     <aside class="w-56 shrink-0 bg-slate-900 text-slate-200 flex flex-col">
-      <div class="px-5 py-5 text-lg font-semibold tracking-wide border-b border-slate-700">
+      <div class="px-5 py-5 text-lg font-semibold tracking-wide border-b border-slate-700" data-i18n="app.title">
         数理化错题本
       </div>
       <nav class="flex-1 py-4">
         <ul class="space-y-1">
           <li>
-            <button class="nav-item active w-full text-left px-5 py-3 hover:bg-slate-800" data-view="notebook">错题本</button>
+            <button class="nav-item active w-full text-left px-5 py-3 hover:bg-slate-800" data-view="notebook" data-i18n="nav.notebook">错题本</button>
           </li>
           <li>
-            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="editor">录入/编辑</button>
+            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="editor" data-i18n="nav.editor">录入/编辑</button>
           </li>
           <li>
-            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="similar">举一反三</button>
+            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="similar" data-i18n="nav.similar">举一反三</button>
           </li>
           <li>
-            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="review">复习计划</button>
+            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="review" data-i18n="nav.review">复习计划</button>
           </li>
           <li>
-            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="export">导出</button>
+            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="export" data-i18n="nav.export">导出</button>
           </li>
           <li>
-            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="settings">设置</button>
+            <button class="nav-item w-full text-left px-5 py-3 hover:bg-slate-800" data-view="settings" data-i18n="nav.settings">设置</button>
           </li>
         </ul>
       </nav>
       <div class="px-5 py-3 text-xs text-slate-500 border-t border-slate-700">
-        <span id="backend-status">后端：检测中…</span>
+        <span id="backend-status" data-i18n="backend.checking">后端：检测中…</span>
       </div>
     </aside>
 
@@ -52,7 +54,7 @@
     <main class="flex-1 overflow-y-auto">
       <header class="flex items-center justify-between px-8 py-5 bg-white border-b border-slate-200">
         <h1 id="view-title" class="text-xl font-semibold">错题本</h1>
-        <button id="refresh-btn" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700">
+        <button id="refresh-btn" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700" data-i18n="header.refresh">
           刷新列表
         </button>
       </header>
@@ -60,7 +62,7 @@
       <!-- 视图：错题本 -->
       <section id="view-notebook" class="view p-8">
         <div class="mb-4">
-          <input id="search-input" type="text" placeholder="按标签搜索，如：函数、数学…"
+          <input id="search-input" type="text" placeholder="按标签搜索，如：函数、数学…" data-i18n-ph="notebook.searchPh"
                  class="w-full max-w-md border border-slate-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:border-blue-500" />
         </div>
         <div id="problems-container" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
@@ -75,8 +77,8 @@
           <div>
             <div id="dropzone"
                  class="dropzone flex flex-col items-center justify-center gap-2 border-2 border-dashed border-slate-300 rounded-lg py-12 px-6 text-center cursor-pointer bg-white">
-              <p class="text-slate-600">拖拽文件到此处，或<span class="text-blue-600 font-medium">点击选择</span></p>
-              <p class="text-xs text-slate-400">支持 PNG / JPG / PDF / DOCX</p>
+              <p class="text-slate-600"><span data-i18n="editor.dropText">拖拽文件到此处，或</span><span class="text-blue-600 font-medium" data-i18n="editor.dropClick">点击选择</span></p>
+              <p class="text-xs text-slate-400" data-i18n="editor.dropFormats">支持 PNG / JPG / PDF / DOCX</p>
               <input id="file-input" type="file" accept=".png,.jpg,.jpeg,.webp,.gif,.bmp,.pdf,.docx" class="hidden" />
             </div>
             <div id="preview-wrap" class="mt-3 hidden">
@@ -85,6 +87,7 @@
             </div>
             <button id="recognize-btn"
                     class="mt-3 px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    data-i18n="editor.recognize"
                     disabled>
               开始识别
             </button>
@@ -95,7 +98,7 @@
           <div id="result-area" class="hidden space-y-4">
             <div class="bg-white rounded-lg border border-slate-200 p-4">
               <div class="flex items-center gap-2 mb-2">
-                <span class="text-sm font-medium text-slate-600">识别结果</span>
+                <span class="text-sm font-medium text-slate-600" data-i18n="editor.resultLabel">识别结果</span>
                 <span id="result-subject" class="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-600"></span>
                 <span id="result-id" class="text-xs text-slate-400"></span>
               </div>
@@ -104,11 +107,11 @@
 
             <!-- 自然语言修正 -->
             <div class="bg-white rounded-lg border border-slate-200 p-4">
-              <label class="block text-sm font-medium text-slate-600 mb-2">手动修正（自然语言）</label>
+              <label class="block text-sm font-medium text-slate-600 mb-2" data-i18n="editor.correctLabel">手动修正（自然语言）</label>
               <div class="flex gap-2">
-                <input id="correct-input" type="text" placeholder="如：把第二行的系数 2 改成 3"
+                <input id="correct-input" type="text" placeholder="如：把第二行的系数 2 改成 3" data-i18n-ph="editor.correctPh"
                        class="flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" />
-                <button id="correct-btn" class="px-4 py-2 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700">
+                <button id="correct-btn" class="px-4 py-2 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700" data-i18n="editor.correctBtn">
                   提交修正
                 </button>
               </div>
@@ -116,10 +119,10 @@
 
             <!-- LaTeX 源码编辑 -->
             <div class="bg-white rounded-lg border border-slate-200 p-4">
-              <label class="block text-sm font-medium text-slate-600 mb-2">LaTeX 源码（可直接编辑）</label>
+              <label class="block text-sm font-medium text-slate-600 mb-2" data-i18n="editor.latexLabel">LaTeX 源码（可直接编辑）</label>
               <textarea id="latex-textarea" rows="6"
                         class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"></textarea>
-              <button id="update-latex-btn" class="mt-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700">
+              <button id="update-latex-btn" class="mt-2 px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700" data-i18n="editor.updateBtn">
                 更新并重新渲染
               </button>
             </div>
@@ -130,25 +133,47 @@
       <!-- 视图：设置 -->
       <section id="view-settings" class="view p-8 hidden">
         <div class="max-w-xl space-y-4">
-          <p class="text-sm text-slate-500">
+          <p class="text-sm text-slate-500" data-i18n="settings.aiDesc">
             配置兼容 OpenAI 规范的 AI 接口（如 Qwen-VL、Claude、DeepSeek）。识图需模型具备多模态能力。
           </p>
           <div>
-            <label class="block text-sm font-medium text-slate-600 mb-1">API Key</label>
+            <label class="block text-sm font-medium text-slate-600 mb-1" data-i18n="settings.apiKey">API Key</label>
             <input id="cfg-api-key" type="password" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm" />
           </div>
           <div>
-            <label class="block text-sm font-medium text-slate-600 mb-1">Base URL</label>
+            <label class="block text-sm font-medium text-slate-600 mb-1" data-i18n="settings.baseUrl">Base URL</label>
             <input id="cfg-base-url" type="text" placeholder="https://api.openai.com/v1"
                    class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm" />
           </div>
           <div>
-            <label class="block text-sm font-medium text-slate-600 mb-1">Model Name</label>
-            <input id="cfg-model-name" type="text" placeholder="如 qwen-vl-max / gpt-4o"
+            <label class="block text-sm font-medium text-slate-600 mb-1" data-i18n="settings.modelName">Model Name</label>
+            <input id="cfg-model-name" type="text" placeholder="如 qwen-vl-max / gpt-4o" data-i18n-ph="settings.modelPh"
                    class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm" />
           </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-600 mb-1" data-i18n="settings.effort">推理强度</label>
+            <select id="cfg-reasoning-effort"
+                    class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white">
+              <option value="high" data-i18n="settings.effortHigh">高（high，推荐）</option>
+              <option value="medium" data-i18n="settings.effortMedium">中（medium）</option>
+              <option value="low" data-i18n="settings.effortLow">低（low）</option>
+              <option value="minimal" data-i18n="settings.effortMinimal">最低（minimal）</option>
+              <option value="auto" data-i18n="settings.effortAuto">自动（不指定，由模型默认）</option>
+            </select>
+            <p class="mt-1 text-xs text-slate-400" data-i18n="settings.effortHint">
+              推理档位越高越准但更慢。不同模型支持的档位不同；若所选模型不支持，会自动忽略该参数。
+            </p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-slate-600 mb-1" data-i18n="settings.language">界面语言</label>
+            <select id="cfg-ui-language"
+                    class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white">
+              <option value="zh">中文</option>
+              <option value="en">English</option>
+            </select>
+          </div>
           <div class="flex items-center gap-3">
-            <button id="save-config-btn" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700">
+            <button id="save-config-btn" class="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700" data-i18n="settings.save">
               保存配置
             </button>
             <span id="config-status" class="text-sm text-slate-500"></span>
@@ -158,7 +183,7 @@
 
       <!-- 视图：举一反三 -->
       <section id="view-similar" class="view p-8 hidden">
-        <p class="text-sm text-slate-500 mb-4">
+        <p class="text-sm text-slate-500 mb-4" data-i18n="similar.desc">
           在「错题本」的任意卡片上点击「生成变式」或「生成拓展」，AI 会基于原题出一道带解答的新题。
           下面列出所有已生成的题目（带「源自」标签）。
         </p>
@@ -169,7 +194,7 @@
 
       <!-- 视图：复习计划 -->
       <section id="view-review" class="view p-8 hidden">
-        <p class="text-sm text-slate-500 mb-4">
+        <p class="text-sm text-slate-500 mb-4" data-i18n="review.desc">
           按艾宾浩斯遗忘曲线（1 / 2 / 4 / 7 / 15 天）排程。下面是今天（含逾期）待复习的错题，
           复习完点「标记为已复习」即可推进到下一阶段。
         </p>
@@ -181,33 +206,35 @@
       <!-- 视图：导出 -->
       <section id="view-export" class="view p-8 hidden">
         <div class="flex items-center justify-between mb-4">
-          <p class="text-sm text-slate-500">
-            勾选要导出的错题，选择版本后下载 <code>.tex</code> 或 <code>.pdf</code> 文件。
+          <p class="text-sm text-slate-500" data-i18n="export.desc">
+            勾选要导出的错题，选择版本后下载 .tex 或 .pdf 文件。
           </p>
           <div class="flex gap-2">
             <button id="export-btn"
-                    class="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50">
+                    class="px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+                    data-i18n="export.latexBtn">
               导出 LaTeX
             </button>
             <button id="export-pdf-btn"
-                    class="px-4 py-2 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700 disabled:opacity-50">
+                    class="px-4 py-2 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700 disabled:opacity-50"
+                    data-i18n="export.pdfBtn">
               导出 PDF
             </button>
           </div>
         </div>
         <div class="mb-4 flex items-center gap-4 text-sm text-slate-600">
-          <span class="text-slate-400">导出版本：</span>
+          <span class="text-slate-400" data-i18n="export.versionLabel">导出版本：</span>
           <label class="flex items-center gap-1.5 cursor-pointer">
             <input type="radio" name="export-version" value="with-answers" checked class="accent-blue-600" />
-            含答案
+            <span data-i18n="export.withAnswers">含答案</span>
           </label>
           <label class="flex items-center gap-1.5 cursor-pointer">
             <input type="radio" name="export-version" value="no-answers" class="accent-blue-600" />
-            不含答案
+            <span data-i18n="export.noAnswers">不含答案</span>
           </label>
           <label class="flex items-center gap-1.5 cursor-pointer">
             <input type="radio" name="export-version" value="answers-last" class="accent-blue-600" />
-            答案在最后
+            <span data-i18n="export.answersLast">答案在最后</span>
           </label>
         </div>
         <div id="export-container" class="space-y-2">
@@ -215,13 +242,6 @@
         </div>
       </section>
 
-      <!-- 视图：占位（保留） -->
-      <section id="view-placeholder" class="view p-8 hidden">
-        <div class="text-center py-16 text-slate-400">
-          <p id="placeholder-title" class="text-lg mb-1"></p>
-          <p class="text-sm">该功能将在后续阶段实现。</p>
-        </div>
-      </section>
     </main>
   </div>
 
@@ -239,8 +259,8 @@
 
       <!-- 题目 / 答案 tab -->
       <div class="flex border-b border-slate-200 px-6 shrink-0">
-        <button id="tab-question" class="detail-tab px-4 py-2.5 text-sm font-medium border-b-2 border-blue-600 text-blue-700">题目</button>
-        <button id="tab-answer" class="detail-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-700">答案</button>
+        <button id="tab-question" class="detail-tab px-4 py-2.5 text-sm font-medium border-b-2 border-blue-600 text-blue-700" data-i18n="detail.tabQuestion">题目</button>
+        <button id="tab-answer" class="detail-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-700" data-i18n="detail.tabAnswer">答案</button>
       </div>
 
       <div class="overflow-y-auto px-6 py-4 flex-1">
@@ -253,42 +273,42 @@
         <div id="panel-answer" class="hidden">
           <div id="detail-answer-render" class="latex-content text-slate-800 leading-relaxed"></div>
           <div id="answer-empty" class="hidden text-center py-8 text-slate-400">
-            <p class="mb-3">这道题还没有答案</p>
+            <p class="mb-3" data-i18n="detail.noAnswer">这道题还没有答案</p>
             <div class="flex justify-center gap-2">
-              <button id="answer-input-btn" class="px-3 py-1.5 text-sm bg-slate-100 text-slate-700 rounded hover:bg-slate-200">手动输入答案</button>
-              <button id="answer-ai-btn" class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700">用 AI 生成答案</button>
+              <button id="answer-input-btn" class="px-3 py-1.5 text-sm bg-slate-100 text-slate-700 rounded hover:bg-slate-200" data-i18n="detail.inputAnswer">手动输入答案</button>
+              <button id="answer-ai-btn" class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700" data-i18n="detail.aiAnswer">用 AI 生成答案</button>
             </div>
           </div>
           <div id="answer-edit" class="hidden mt-2">
-            <textarea id="answer-input" rows="5" placeholder="输入答案内容（支持 \\( \\) 和 \\[ \\] 公式）"
+            <textarea id="answer-input" rows="5" placeholder="输入答案内容（支持 \( \) 和 \[ \] 公式）" data-i18n-ph="detail.answerPh"
                       class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"></textarea>
             <div class="flex items-center gap-2 mt-2">
-              <button id="answer-save-btn" class="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700">保存答案</button>
-              <button id="answer-cancel-btn" class="px-3 py-1.5 text-sm text-slate-500 hover:text-slate-700">取消</button>
+              <button id="answer-save-btn" class="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700" data-i18n="detail.saveAnswer">保存答案</button>
+              <button id="answer-cancel-btn" class="px-3 py-1.5 text-sm text-slate-500 hover:text-slate-700" data-i18n="detail.cancel">取消</button>
               <span id="answer-status" class="text-sm text-slate-500"></span>
             </div>
           </div>
           <div class="mt-3">
-            <button id="answer-edit-btn" class="hidden text-xs text-slate-400 hover:text-blue-600">编辑答案</button>
+            <button id="answer-edit-btn" class="hidden text-xs text-slate-400 hover:text-blue-600" data-i18n="detail.editAnswer">编辑答案</button>
           </div>
         </div>
 
         <!-- 标签（可添加） -->
         <div class="mt-4 pt-4 border-t border-slate-100">
           <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-xs text-slate-400">标签：</span>
+            <span class="text-xs text-slate-400" data-i18n="detail.tags">标签：</span>
             <div id="detail-tags" class="flex flex-wrap gap-1"></div>
-            <input id="tag-input" type="text" placeholder="添加标签…"
+            <input id="tag-input" type="text" placeholder="添加标签…" data-i18n-ph="detail.tagPh"
                    class="border border-slate-300 rounded px-2 py-0.5 text-xs w-32 focus:outline-none focus:border-blue-500" />
-            <button id="tag-add-btn" class="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700">添加</button>
+            <button id="tag-add-btn" class="text-xs px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700" data-i18n="detail.addTag">添加</button>
             <span id="tag-status" class="text-xs text-slate-500"></span>
           </div>
         </div>
 
         <div class="flex items-center gap-4 mt-4 pt-4 border-t border-slate-100 text-xs text-slate-400">
-          <span>创建于：<span id="detail-created"></span></span>
-          <span>下次复习：<span id="detail-review-date"></span></span>
-          <span>复习阶段：<span id="detail-review-stage"></span>/5</span>
+          <span><span data-i18n="detail.createdAt">创建于：</span><span id="detail-created"></span></span>
+          <span><span data-i18n="detail.nextReviewLabel">下次复习：</span><span id="detail-review-date"></span></span>
+          <span><span data-i18n="detail.stageLabel">复习阶段：</span><span id="detail-review-stage"></span>/5</span>
         </div>
       </div>
     </div>
