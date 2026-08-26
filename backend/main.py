@@ -81,6 +81,8 @@ JSON_SPEC = (
     "tags 字段是必填项，不得为空数组：必须为每道题给出 2-4 个具体的知识点标签"
     "（例如「二次函数」「数列递推」「牛顿第二定律」「氧化还原反应」这种细分知识点，"
     "而不是「数学」「物理」这类学科名）。标签语言与题目语言保持一致。\n"
+    "注意：subject 是固定枚举，只能填「数学」「物理」「化学」三个中文词之一，"
+    "不受上述语言一致性规则约束——即使题目是英文，subject 也必须是中文。\n"
 )
 
 OCR_PROMPT = (
@@ -123,6 +125,29 @@ app.add_middleware(
 SELECT_COLS = (
     "p.*, (SELECT COUNT(*) FROM problems q WHERE q.id <= p.id) AS seq"
 )
+
+
+# 学科在库里统一存中文枚举（数学/物理/化学），界面再按语言翻译显示。
+# 但「输出跟随题目语言」的规则会让模型对英文题返回 "Mathematics"，
+# 导致学科色块失效、自动附加的学科标签中英分裂（同一学科两种标签、
+# 按标签搜索被割裂）。故入库前统一归一化。
+SUBJECT_ALIASES = {
+    "math": "数学",
+    "maths": "数学",
+    "mathematics": "数学",
+    "physics": "物理",
+    "physic": "物理",
+    "chemistry": "化学",
+    "chem": "化学",
+}
+
+
+def _normalize_subject(subject: Optional[str]) -> Optional[str]:
+    """把英文/异体学科名归一成中文枚举；无法识别时原样返回。"""
+    if not subject:
+        return subject
+    s = subject.strip()
+    return SUBJECT_ALIASES.get(s.lower(), s)
 
 
 def _split_q_a(content: str) -> tuple[str, Optional[str]]:
@@ -271,6 +296,9 @@ def _insert_problem(
     tags 自动带上学科标签（如数学/物理/化学），方便按学科筛选。
     """
     today = date.today().isoformat()
+    # 学科归一化：模型对英文题可能返回 "Mathematics"，统一转中文枚举，
+    # 保证色块、自动标签、按标签搜索在中英界面下都一致。
+    subject = _normalize_subject(subject)
     # 学科标签自动附加（去重）：所有录入路径统一生效。
     tags = list(tags or [])
     if subject and subject not in tags:
@@ -773,6 +801,7 @@ def export_latex(req: ExportRequest) -> Response:
         problems,
         include_answers=req.include_answers,
         answers_last=req.answers_last,
+        language=req.language,
     )
     return Response(
         content=tex,

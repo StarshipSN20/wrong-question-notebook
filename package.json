@@ -16,7 +16,7 @@
   },
   "build": {
     "appId": "com.mistakenotebook.app",
-    "productName": "数理化错题本",
+    "productName": "MistakeNotebook",
     "directories": {
       "output": "release"
     },
@@ -34,18 +34,18 @@
     ],
     "win": {
       "target": ["nsis"],
-      "artifactName": "数理化错题本-${version}-setup.${ext}"
+      "artifactName": "MistakeNotebook-${version}-setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "数理化错题本"
+      "shortcutName": "Mistake Notebook"
     },
     "mac": {
       "target": ["dmg"],
       "category": "public.app-category.education",
-      "artifactName": "数理化错题本-${version}.${ext}"
+      "artifactName": "MistakeNotebook-${version}.${ext}"
     }
   }
 }

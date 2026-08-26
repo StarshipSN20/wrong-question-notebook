@@ -98,3 +98,5 @@ class ExportRequest(BaseModel):
     problem_ids: List[int]
     include_answers: bool = True
     answers_last: bool = False
+    # 卷头用词语言（zh/en），跟随界面语言，避免英文界面导出中文卷头
+    language: str = "zh"
