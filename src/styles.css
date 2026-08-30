@@ -26,6 +26,55 @@
   border-color: #93c5fd; /* blue-300 */
 }
 
+/* ---------------------------------------------------------------------------
+   选择框统一样式（设置页 / 详情弹窗）
+   目标：下拉框与「带候选列表的输入框」长得一样——同样的 ⌄ 箭头、同样的内边距、
+   右边缘对齐。原生状态下 select 有箭头而 input[list] 没有，看着不像一类控件。
+   --------------------------------------------------------------------------- */
+.choice-box {
+  /* 关掉原生外观，改用下面自绘的箭头，保证 select 与 input 完全一致 */
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3E%3Cpath stroke='%2364748b' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.6' d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.6rem center;
+  background-size: 1.15rem 1.15rem;
+}
+
+/* 给箭头留出右侧空间，否则长模型名（如 gpt-5.3-codex-spark）会压到箭头上。
+   必须写成「元素名 + 类名」：Tailwind Play CDN 是运行时把 <style> 插到 head 末尾的，
+   排在 styles.css 之后，同为单类选择器时它的 .px-3 会赢。加上元素名提高优先级才压得住。 */
+input.choice-box,
+select.choice-box {
+  padding-right: 2.1rem;
+}
+
+input.choice-box-sm,
+select.choice-box-sm {
+  padding-right: 1.5rem;
+}
+
+/* input[list] 的原生下拉按钮必须藏掉：Chromium 各版本对它的绘制时机不一致
+   （有的只在 hover 时露出），留着会在悬停时冒出**第二个箭头**，和自绘的 ⌄ 并排。
+   藏掉之后点击行为由 render.js 接管：点在箭头区域调 showPicker() 打开候选列表
+   （已测：点文字区不触发、点箭头区触发）。 */
+.choice-box[list]::-webkit-calendar-picker-indicator {
+  display: none !important;
+}
+
+/* 小号选择框（详情弹窗的学科下拉）：箭头与留白按比例收窄 */
+.choice-box-sm {
+  background-position: right 0.35rem center;
+  background-size: 0.95rem 0.95rem;
+  padding-right: 1.5rem;
+}
+
+/* 选择框右侧的辅助按钮（获取模型列表 / 检测可用档位）：
+   给一个统一下限宽度，否则中英文文案长度不同会让两行的选择框右边缘错开几像素。 */
+.field-btn {
+  min-width: 7.5rem;
+}
+
 /* 上传拖拽区 */
 .dropzone {
   transition: border-color 0.15s, background-color 0.15s;

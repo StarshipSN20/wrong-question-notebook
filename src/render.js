@@ -238,9 +238,7 @@ function showProblemDetail(id) {
 
 function renderDetail(p) {
   detailProblem = p;
-  document.getElementById("detail-subject").textContent = subjectLabel(p.subject);
-  document.getElementById("detail-subject").className =
-    `inline-block px-2 py-0.5 text-xs rounded ${SUBJECT_COLORS[p.subject] || "bg-slate-100 text-slate-700"}`;
+  renderSubjectBadge(p);
   document.getElementById("detail-id").textContent = `#${p.seq || p.id}`;
 
   const badge = document.getElementById("detail-badge");
@@ -260,6 +258,8 @@ function renderDetail(p) {
   renderAnswerPanel();
   renderDetailTags();
   setDetailTab("question");
+  document.getElementById("answer-correct-input").value = "";
+  document.getElementById("subject-status").textContent = "";
 
   document.getElementById("detail-created").textContent = p.created_at || "-";
   document.getElementById("detail-review-date").textContent = p.next_review_date || "-";
@@ -272,25 +272,44 @@ function closeDetailModal() {
   document.getElementById("detail-modal").classList.add("hidden");
 }
 
-// 答案面板：有答案则渲染，无答案显示空态（手动输入 / AI 生成）
-function renderAnswerPanel() {
+// 答案面板：有答案则渲染并显示「重新生成 / 修正 / 编辑」工具区，
+// 无答案显示空态（手动输入 / AI 生成）。与「录入/编辑」页的题目流程一致。
+// keepStatus：AI 生成完成后保留状态提示（否则刚写的「已生成 ✓」会被立刻擦掉）。
+function renderAnswerPanel(keepStatus = false) {
   const p = detailProblem;
   const render = document.getElementById("detail-answer-render");
   const empty = document.getElementById("answer-empty");
   const edit = document.getElementById("answer-edit");
-  const editBtn = document.getElementById("answer-edit-btn");
+  const tools = document.getElementById("answer-tools");
 
   const answer = p.answer_latex;
+  // textContent 而非 innerHTML：答案是纯文本，KaTeX 随后就地把公式替换成 DOM，
+  // 这样既不会 XSS 也不会把用户写的 < 当标签。
   render.textContent = answer || "";
   renderLatex(render);
 
   const hasAnswer = !!(answer && answer.trim());
   render.classList.toggle("hidden", !hasAnswer);
   empty.classList.toggle("hidden", hasAnswer);
+  tools.classList.toggle("hidden", !hasAnswer);
   edit.classList.add("hidden");
-  editBtn.classList.toggle("hidden", !hasAnswer);
   document.getElementById("answer-input").value = answer || "";
-  document.getElementById("answer-status").textContent = "";
+  document.getElementById("answer-edit-status").textContent = "";
+  if (!keepStatus) setAnswerStatus("");
+}
+
+// 答案区状态提示（生成中 / 已生成 / 失败）
+function setAnswerStatus(msg, kind = "info") {
+  const el = document.getElementById("answer-status");
+  el.textContent = msg || "";
+  const color =
+    kind === "error"
+      ? "text-red-500"
+      : kind === "ok"
+      ? "text-emerald-600"
+      : "text-slate-500";
+  // 有内容时才留上边距，避免空状态下多出一条空白
+  el.className = `text-sm ${color}${msg ? " mt-2" : ""}`;
 }
 
 // 详情弹窗标签区渲染
@@ -321,11 +340,10 @@ function setDetailTab(tab) {
   document.getElementById("panel-answer").classList.toggle("hidden", isQuestion);
 }
 
-// 手动输入答案：显示编辑区
+// 手动输入 / 编辑答案：显示源码编辑区
 function showAnswerEdit() {
   document.getElementById("answer-empty").classList.add("hidden");
   document.getElementById("answer-edit").classList.remove("hidden");
-  document.getElementById("answer-edit-btn").classList.add("hidden");
   document.getElementById("answer-input").focus();
 }
 
@@ -333,7 +351,7 @@ function showAnswerEdit() {
 async function saveAnswer() {
   if (!detailProblem) return;
   const input = document.getElementById("answer-input");
-  const status = document.getElementById("answer-status");
+  const status = document.getElementById("answer-edit-status");
   status.textContent = t("editor.saving");
   try {
     const res = await fetch(`${API_BASE}/api/problems/${detailProblem.id}`, {
@@ -354,36 +372,120 @@ async function saveAnswer() {
   }
 }
 
-// 用 AI 生成答案
-async function generateAnswerByAI() {
+// 用 AI 生成 / 重新生成 / 按自然语言修正答案。
+//
+// 三种用法共用一个接口（POST /api/generate-answer）：
+//   {}                        首次生成
+//   { regenerate: true }      不满意，换一种思路重解
+//   { user_feedback: "…" }    用自然语言说明哪里要改
+// 与「录入/编辑」页题目的「提交修正」是同一套交互，只是作用在答案上。
+async function generateAnswerByAI({ regenerate = false, feedback = "" } = {}) {
   if (!detailProblem) return;
-  const status = document.getElementById("answer-status");
-  const btn = document.getElementById("answer-ai-btn");
-  const original = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = t("card.generating");
-  status.textContent = t("detail.aiGenerating");
-  status.className = "text-sm text-slate-500";
+  const buttons = [
+    document.getElementById("answer-ai-btn"),
+    document.getElementById("answer-regen-btn"),
+    document.getElementById("answer-correct-btn"),
+  ];
+  const labels = buttons.map((b) => b.textContent);
+  buttons.forEach((b) => {
+    b.disabled = true;
+  });
+  const busyBtn = feedback
+    ? document.getElementById("answer-correct-btn")
+    : regenerate
+    ? document.getElementById("answer-regen-btn")
+    : document.getElementById("answer-ai-btn");
+  busyBtn.textContent = t("card.generating");
+  setAnswerStatus(
+    feedback ? t("detail.answerCorrecting") : t("detail.aiGenerating")
+  );
+
   try {
     const res = await fetch(`${API_BASE}/api/generate-answer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ problem_id: detailProblem.id }),
+      body: JSON.stringify({
+        problem_id: detailProblem.id,
+        regenerate,
+        user_feedback: feedback || null,
+      }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     detailProblem = data;
     problemsCache.set(data.id, data);
-    renderAnswerPanel();
-    status.textContent = t("detail.aiGenerated");
-    status.className = "text-sm text-emerald-600";
+    renderAnswerPanel(true);
+    if (feedback) document.getElementById("answer-correct-input").value = "";
+    setAnswerStatus(
+      feedback
+        ? t("detail.answerCorrected")
+        : regenerate
+        ? t("detail.answerRegenerated")
+        : t("detail.aiGenerated"),
+      "ok"
+    );
   } catch (err) {
-    status.textContent = t("detail.aiGenFailed", { msg: err.message });
-    status.className = "text-sm text-red-500";
+    setAnswerStatus(t("detail.aiGenFailed", { msg: err.message }), "error");
   } finally {
-    btn.disabled = false;
-    btn.textContent = original;
+    buttons.forEach((b, i) => {
+      b.disabled = false;
+      b.textContent = labels[i];
+    });
   }
+}
+
+// 自然语言修正答案（读输入框后走同一条生成链路）
+function submitAnswerCorrection() {
+  const input = document.getElementById("answer-correct-input");
+  const feedback = input.value.trim();
+  if (!feedback) return;
+  generateAnswerByAI({ feedback });
+}
+
+// 改学科：PATCH subject，后端会同步替换旧的学科标签
+async function changeSubject(value) {
+  if (!detailProblem) return;
+  const status = document.getElementById("subject-status");
+  status.textContent = t("editor.saving");
+  status.className = "text-xs text-slate-400";
+  try {
+    const res = await fetch(`${API_BASE}/api/problems/${detailProblem.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subject: value }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    detailProblem = data;
+    problemsCache.set(data.id, data);
+    // 学科色块、标签、列表卡片都跟着变
+    renderSubjectBadge(data);
+    renderDetailTags();
+    status.textContent = t("settings.saved");
+    status.className = "text-xs text-emerald-600";
+    refreshCurrentList();
+  } catch (err) {
+    status.textContent = t("detail.subjectFailed", { msg: err.message });
+    status.className = "text-xs text-red-500";
+  }
+}
+
+// 弹窗顶部的学科色块（改学科后要重画）
+function renderSubjectBadge(p) {
+  const el = document.getElementById("detail-subject");
+  el.textContent = subjectLabel(p.subject);
+  el.className = `inline-block px-2 py-0.5 text-xs rounded ${
+    SUBJECT_COLORS[p.subject] || "bg-slate-100 text-slate-700"
+  }`;
+  document.getElementById("detail-subject-select").value = p.subject || "";
+}
+
+// 重新加载当前视图的列表（改学科/标签后让卡片同步）
+function refreshCurrentList() {
+  if (currentView === "notebook") loadProblems();
+  else if (currentView === "similar") loadSimilar();
+  else if (currentView === "review") loadReviewDue();
+  else if (currentView === "export") loadExportList();
 }
 
 // 添加标签（PATCH tags）
@@ -1047,17 +1149,103 @@ async function updateLatex() {
 // ---------------------------------------------------------------------------
 // 设置视图
 // ---------------------------------------------------------------------------
+// 推理档位下拉框的展示名（阶梯值 → i18n key）。
+const EFFORT_LABEL_KEYS = {
+  none: "effort.none",
+  minimal: "effort.minimal",
+  low: "effort.low",
+  medium: "effort.medium",
+  high: "effort.high",
+  xhigh: "effort.xhigh",
+  max: "effort.max",
+};
+
+// 按当前模型构建推理档位下拉框。
+//
+// 档位不是写死的：向 /api/effort/levels 要「这个模型实际能用哪些档位」，
+// 数据来源可能是真实探测（probe）、调用中撞墙学到的（learned）、
+// 已知模型表（catalog）或完全未知（default）。
+// 不支持的档位不隐藏、只标注，因为探测结果可能偏保守，用户仍应能手动选。
+async function loadEffortLevels(selected) {
+  const select = document.getElementById("cfg-reasoning-effort");
+  const note = document.getElementById("effort-source");
+  const model = document.getElementById("cfg-model-name").value.trim();
+
+  // 把「当前选中的档位」一起带上：后端据此算出实际会发送的档位，
+  // 于是用户还没点保存就能看到「这一档会被降级成 X」。
+  const wanted = selected || document.getElementById("cfg-reasoning-effort").value;
+
+  let info = null;
+  try {
+    const qs = new URLSearchParams({ model });
+    if (wanted) qs.set("requested", wanted);
+    const res = await fetch(`${API_BASE}/api/effort/levels?${qs}`);
+    if (res.ok) info = await res.json();
+  } catch {
+    /* 后端不可用：下面用整条阶梯兜底，不影响用户改设置 */
+  }
+
+  const ladder = info?.ladder || Object.keys(EFFORT_LABEL_KEYS);
+  const supported = info?.supported || ladder;
+  const knownSupport = info && info.source !== "default";
+
+  const options = ladder.map((level) => {
+    const label = t(EFFORT_LABEL_KEYS[level] || level);
+    // 只有在「确实知道支持情况」时才标注不支持，避免 default 状态下误导。
+    const suffix = knownSupport && !supported.includes(level)
+      ? ` ${t("effort.unsupportedSuffix")}`
+      : "";
+    return `<option value="${escapeHtml(level)}">${escapeHtml(label + suffix)}</option>`;
+  });
+  options.push(
+    `<option value="auto">${escapeHtml(t("settings.effortAuto"))}</option>`
+  );
+  select.innerHTML = options.join("");
+
+  const want = selected || info?.requested || "high";
+  select.value = ladder.includes(want) || want === "auto" ? want : "high";
+
+  renderEffortSource(info, note);
+}
+
+// 档位信息的来源说明 + 「会自动降级为 X」提示
+function renderEffortSource(info, note) {
+  if (!info) {
+    note.textContent = "";
+    return;
+  }
+  const sourceText = t(`effort.source.${info.source}`);
+  const select = document.getElementById("cfg-reasoning-effort");
+  const chosen = select.value;
+  const knownSupport = info.source !== "default";
+
+  let extra = "";
+  if (knownSupport && chosen !== "auto" && !info.supported.includes(chosen)) {
+    // info.effective 就是后端 resolve() 对「当前选中档位」算出的实际发送值。
+    // 只有在它确实换了一档时才说「会用 X」，否则退回泛化提示。
+    const effective =
+      info.requested === chosen && info.effective && info.effective !== chosen
+        ? info.effective
+        : null;
+    extra = effective
+      ? ` ${t("effort.willDegrade", { level: effective })}`
+      : ` ${t("effort.mayDegrade")}`;
+  }
+  note.textContent = sourceText + extra;
+  note.className = `mt-1 text-xs ${extra ? "text-amber-600" : "text-slate-500"}`;
+}
+
 async function loadConfig() {
   const status = document.getElementById("config-status");
   status.textContent = "";
+  document.getElementById("models-status").textContent = "";
   try {
     const res = await fetch(`${API_BASE}/api/config`);
     const cfg = await res.json();
     document.getElementById("cfg-api-key").value = cfg.api_key || "";
     document.getElementById("cfg-base-url").value = cfg.base_url || "";
     document.getElementById("cfg-model-name").value = cfg.model_name || "";
-    document.getElementById("cfg-reasoning-effort").value =
-      cfg.reasoning_effort || "high";
+    await loadEffortLevels(cfg.reasoning_effort || "high");
     // 界面语言以本地生效的值为准（localStorage 已在 i18n.js 中读取），
     // 避免后端配置与当前界面不一致时下拉框显示错位。
     document.getElementById("cfg-ui-language").value = getLanguage();
@@ -1067,7 +1255,78 @@ async function loadConfig() {
   }
 }
 
-async function saveConfig() {
+// 真实探测当前模型支持哪些档位：后端会逐档发一次极小请求。
+// 需要先保存配置（探测用的是后端已存的 key/base_url/model）。
+async function probeEffort() {
+  const btn = document.getElementById("probe-effort-btn");
+  const note = document.getElementById("effort-source");
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t("settings.probing");
+  note.textContent = t("settings.probingHint");
+  note.className = "mt-1 text-xs text-slate-500";
+  try {
+    // 先落盘当前表单，否则探测的是上一次保存的模型
+    await saveConfig({ silent: true });
+    const res = await fetch(`${API_BASE}/api/effort/probe`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+
+    const select = document.getElementById("cfg-reasoning-effort");
+    await loadEffortLevels(select.value);
+    const parts = [
+      t("settings.probeDone", {
+        list: data.supported.length ? data.supported.join(" / ") : t("settings.probeNone"),
+      }),
+    ];
+    if (data.inconclusive?.length) {
+      parts.push(t("settings.probeUnclear", { list: data.inconclusive.join(" / ") }));
+    }
+    note.textContent = parts.join("  ");
+    note.className = "mt-1 text-xs text-emerald-600";
+  } catch (err) {
+    note.textContent = t("settings.probeFailed", { msg: err.message });
+    note.className = "mt-1 text-xs text-red-500";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+// 拉上游模型列表，填进 datalist（输入框仍可手填）
+async function fetchModels() {
+  const btn = document.getElementById("fetch-models-btn");
+  const status = document.getElementById("models-status");
+  const original = btn.textContent;
+  btn.disabled = true;
+  status.textContent = t("common.loading");
+  status.className = "mt-1 text-xs text-slate-400";
+  try {
+    await saveConfig({ silent: true });
+    const res = await fetch(`${API_BASE}/api/models`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    const models = data.models || [];
+    document.getElementById("cfg-model-list").innerHTML = models
+      .map((m) => `<option value="${escapeHtml(m)}"></option>`)
+      .join("");
+    status.textContent = models.length
+      ? t("settings.modelsLoaded", { n: models.length })
+      : t("settings.modelsEmpty");
+    status.className = `mt-1 text-xs ${models.length ? "text-emerald-600" : "text-slate-400"}`;
+  } catch (err) {
+    status.textContent = t("settings.modelsFailed", { msg: err.message });
+    status.className = "mt-1 text-xs text-red-500";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+// 保存设置。silent=true 时不写状态提示、失败向上抛——
+// 供「检测可用档位」「获取模型列表」先落盘表单再调用后端时复用
+// （后端读的是 config.json，不先保存就会拿上一次的模型名去探测）。
+async function saveConfig({ silent = false } = {}) {
   const status = document.getElementById("config-status");
   const payload = {
     api_key: document.getElementById("cfg-api-key").value,
@@ -1076,8 +1335,10 @@ async function saveConfig() {
     reasoning_effort: document.getElementById("cfg-reasoning-effort").value,
     ui_language: document.getElementById("cfg-ui-language").value,
   };
-  status.textContent = t("editor.saving");
-  status.className = "text-sm text-slate-500";
+  if (!silent) {
+    status.textContent = t("editor.saving");
+    status.className = "text-sm text-slate-500";
+  }
   try {
     const res = await fetch(`${API_BASE}/api/config`, {
       method: "POST",
@@ -1085,9 +1346,12 @@ async function saveConfig() {
       body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    status.textContent = t("settings.saved");
-    status.className = "text-sm text-emerald-600";
+    if (!silent) {
+      status.textContent = t("settings.saved");
+      status.className = "text-sm text-emerald-600";
+    }
   } catch (err) {
+    if (silent) throw err;
     status.textContent = t("settings.saveFailed", { msg: err.message });
     status.className = "text-sm text-red-500";
   }
@@ -1142,11 +1406,13 @@ async function changeLanguage(lang) {
   const langSelect = document.getElementById("cfg-ui-language");
   if (langSelect) langSelect.value = getLanguage();
 
+  // 推理档位下拉框是动态生成的，applyStaticTranslations 管不到它，
+  // 必须重建一遍，否则切到英文后档位名还是中文。
+  const effortSelect = document.getElementById("cfg-reasoning-effort");
+  if (effortSelect) await loadEffortLevels(effortSelect.value);
+
   // 重渲染当前视图（卡片、列表里的文案与学科名都随语言变）。
-  if (currentView === "notebook") loadProblems();
-  else if (currentView === "similar") loadSimilar();
-  else if (currentView === "review") loadReviewDue();
-  else if (currentView === "export") loadExportList();
+  refreshCurrentList();
 
   // 详情弹窗若开着，一并重渲染。
   const modal = document.getElementById("detail-modal");
@@ -1186,9 +1452,44 @@ document.addEventListener("DOMContentLoaded", () => {
     .getElementById("review-container")
     .addEventListener("click", onReviewClick);
   document.getElementById("export-btn").addEventListener("click", exportSelected);
+  // 包一层箭头函数：直接传 saveConfig 会把 MouseEvent 当参数传进去
   document
     .getElementById("save-config-btn")
-    .addEventListener("click", saveConfig);
+    .addEventListener("click", () => saveConfig());
+
+  // 设置页：模型列表 / 档位探测
+  document.getElementById("fetch-models-btn").addEventListener("click", fetchModels);
+  document.getElementById("probe-effort-btn").addEventListener("click", probeEffort);
+
+  // 模型名输入框右侧的 ⌄ 是 CSS 画的（为了和下拉框长得一样），本身不可点。
+  // 点在箭头区域时用 showPicker() 打开候选列表，让它和真下拉框一样好用；
+  // 点在文字区域仍然是正常输入，不会动不动就弹出列表。
+  const modelInput = document.getElementById("cfg-model-name");
+  modelInput.addEventListener("click", (e) => {
+    const arrowZone = 34; // 与 styles.css 里 .choice-box 的 padding-right 对齐
+    if (e.offsetX < modelInput.clientWidth - arrowZone) return;
+    try {
+      modelInput.showPicker();
+    } catch {
+      /* 老版本 Chromium 没有 showPicker：退回原生行为（聚焦后按 ↓ 也能开） */
+    }
+  });
+  // 改模型名 → 重建档位下拉框（不同模型可用档位不同）
+  let modelTimer = null;
+  document.getElementById("cfg-model-name").addEventListener("input", () => {
+    clearTimeout(modelTimer);
+    modelTimer = setTimeout(() => {
+      const select = document.getElementById("cfg-reasoning-effort");
+      loadEffortLevels(select.value);
+    }, 400);
+  });
+  // 选了档位 → 立即提示是否会被降级
+  document
+    .getElementById("cfg-reasoning-effort")
+    .addEventListener("change", () => {
+      const select = document.getElementById("cfg-reasoning-effort");
+      loadEffortLevels(select.value);
+    });
 
   // 界面语言下拉框：选中即时生效（无需点保存）
   const langSelect = document.getElementById("cfg-ui-language");
@@ -1207,12 +1508,33 @@ document.addEventListener("DOMContentLoaded", () => {
   // 详情弹窗：题目/答案 tab
   document.getElementById("tab-question").addEventListener("click", () => setDetailTab("question"));
   document.getElementById("tab-answer").addEventListener("click", () => setDetailTab("answer"));
-  // 答案：手动输入 / AI 生成 / 编辑
+  // 答案：手动输入 / AI 生成 / 重新生成 / 自然语言修正 / 编辑源码
   document.getElementById("answer-input-btn").addEventListener("click", showAnswerEdit);
-  document.getElementById("answer-ai-btn").addEventListener("click", generateAnswerByAI);
+  document
+    .getElementById("answer-ai-btn")
+    .addEventListener("click", () => generateAnswerByAI());
+  document
+    .getElementById("answer-regen-btn")
+    .addEventListener("click", () => generateAnswerByAI({ regenerate: true }));
+  document
+    .getElementById("answer-correct-btn")
+    .addEventListener("click", submitAnswerCorrection);
+  document
+    .getElementById("answer-correct-input")
+    .addEventListener("keydown", (e) => {
+      if (e.key === "Enter") submitAnswerCorrection();
+    });
   document.getElementById("answer-save-btn").addEventListener("click", saveAnswer);
-  document.getElementById("answer-cancel-btn").addEventListener("click", renderAnswerPanel);
+  // 取消编辑：回到只读态（箭头函数避免把 MouseEvent 当 keepStatus 传进去）
+  document
+    .getElementById("answer-cancel-btn")
+    .addEventListener("click", () => renderAnswerPanel());
   document.getElementById("answer-edit-btn").addEventListener("click", showAnswerEdit);
+
+  // 学科：下拉切换即保存（后端同步替换旧学科标签）
+  document
+    .getElementById("detail-subject-select")
+    .addEventListener("change", (e) => changeSubject(e.target.value));
   // 标签：添加 / 删除
   document.getElementById("tag-add-btn").addEventListener("click", addTag);
   document.getElementById("tag-input").addEventListener("keydown", (e) => {

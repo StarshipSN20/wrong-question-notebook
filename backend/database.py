@@ -95,5 +95,40 @@ def init_db() -> None:
         )
 
         conn.commit()
+        _repair_answer_blobs(conn)
     finally:
         conn.close()
+
+
+def _repair_answer_blobs(conn: sqlite3.Connection) -> int:
+    """修复老数据里存成 JSON 整坨的 answer_latex，返回修复条数。
+
+    起因：早期 /api/generate-answer 复用了要求「只返回 JSON 对象」的提示词，
+    于是答案被原样存成 {"latex_code":"...\\\\[...\\\\]..."}，前端渲染不出公式，
+    导出的 .tex 也是坏的。只挑以 { 开头的行处理，正常答案不受影响；
+    修完就不再以 { 开头，因此天然幂等。
+
+    注意有两种坏法，都要能修：
+    1. 合法 JSON（反斜杠已转义）→ 直接解析取字段；
+    2. **非法 JSON**（模型把 `\\(` 直接写进字符串，`\\(` 不是合法 JSON 转义）
+       → textfix 会先补齐转义再解析。第 2 种是实际遇到的，早期版本修不了它。
+    """
+    from services import textfix
+
+    rows = conn.execute(
+        "SELECT id, answer_latex FROM problems "
+        "WHERE answer_latex IS NOT NULL AND TRIM(answer_latex) LIKE '{%'"
+    ).fetchall()
+
+    fixed = 0
+    for row in rows:
+        repaired = textfix.repair_answer(row["answer_latex"])
+        # 收敛不出正文（仍以 { 开头）时不动，避免把内容写坏。
+        if repaired and not repaired.lstrip().startswith("{"):
+            conn.execute(
+                "UPDATE problems SET answer_latex = ? WHERE id = ?", (repaired, row["id"])
+            )
+            fixed += 1
+    if fixed:
+        conn.commit()
+    return fixed

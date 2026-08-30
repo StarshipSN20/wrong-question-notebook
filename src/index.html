@@ -145,27 +145,39 @@
           </div>
           <div>
             <label class="block text-sm font-medium text-slate-600 mb-1" data-i18n="settings.modelName">Model Name</label>
-            <input id="cfg-model-name" type="text" placeholder="如 qwen-vl-max / gpt-4o" data-i18n-ph="settings.modelPh"
-                   class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm" />
+            <div class="flex gap-2">
+              <input id="cfg-model-name" type="text" list="cfg-model-list" placeholder="如 qwen-vl-max / gpt-4o" data-i18n-ph="settings.modelPh"
+                     class="choice-box flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm bg-white" />
+              <button id="fetch-models-btn" type="button"
+                      class="field-btn px-3 py-2 text-sm bg-slate-100 text-slate-700 rounded-md hover:bg-slate-200 disabled:opacity-50 whitespace-nowrap"
+                      data-i18n="settings.fetchModels">获取模型列表</button>
+            </div>
+            <!-- 上游 /models 拉回来的模型名，输入框直接下拉可选 -->
+            <datalist id="cfg-model-list"></datalist>
+            <p id="models-status" class="mt-1 text-xs text-slate-400"></p>
           </div>
           <div>
             <label class="block text-sm font-medium text-slate-600 mb-1" data-i18n="settings.effort">推理强度</label>
-            <select id="cfg-reasoning-effort"
-                    class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white">
-              <option value="high" data-i18n="settings.effortHigh">高（high，推荐）</option>
-              <option value="medium" data-i18n="settings.effortMedium">中（medium）</option>
-              <option value="low" data-i18n="settings.effortLow">低（low）</option>
-              <option value="minimal" data-i18n="settings.effortMinimal">最低（minimal）</option>
-              <option value="auto" data-i18n="settings.effortAuto">自动（不指定，由模型默认）</option>
-            </select>
+            <div class="flex gap-2">
+              <!-- 选项由 render.js 按当前模型动态生成（见 /api/effort/levels） -->
+              <select id="cfg-reasoning-effort"
+                      class="choice-box flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm bg-white">
+              </select>
+              <button id="probe-effort-btn" type="button"
+                      class="field-btn px-3 py-2 text-sm bg-slate-100 text-slate-700 rounded-md hover:bg-slate-200 disabled:opacity-50 whitespace-nowrap"
+                      data-i18n="settings.probeEffort">检测可用档位</button>
+            </div>
+            <p id="effort-source" class="mt-1 text-xs text-slate-500"></p>
             <p class="mt-1 text-xs text-slate-400" data-i18n="settings.effortHint">
-              推理档位越高越准但更慢。不同模型支持的档位不同；若所选模型不支持，会自动忽略该参数。
+              档位越高越准但更慢。各模型支持的档位不同：点「检测可用档位」会真的逐档试一次，
+              据此标出该模型支持哪些档位；选了不支持的档位会自动降到最接近的可用档位。
+              注意：xhigh / max 在长题目上可能耗时数分钟甚至被上游网关中断，日常用 high 一般就够。
             </p>
           </div>
           <div>
             <label class="block text-sm font-medium text-slate-600 mb-1" data-i18n="settings.language">界面语言</label>
             <select id="cfg-ui-language"
-                    class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white">
+                    class="choice-box w-full border border-slate-300 rounded-md px-3 py-2 text-sm bg-white">
               <option value="zh">中文</option>
               <option value="en">English</option>
             </select>
@@ -267,9 +279,12 @@
           <div id="detail-content" class="latex-content text-slate-800 leading-relaxed"></div>
         </div>
 
-        <!-- 答案面板 -->
+        <!-- 答案面板：与「录入/编辑」页的题目流程对齐
+             （AI 生成 → 不满意可重新生成 / 自然语言修正 → 也能直接改源码） -->
         <div id="panel-answer" class="hidden">
           <div id="detail-answer-render" class="latex-content text-slate-800 leading-relaxed"></div>
+
+          <!-- 空态：还没有答案 -->
           <div id="answer-empty" class="hidden text-center py-8 text-slate-400">
             <p class="mb-3" data-i18n="detail.noAnswer">这道题还没有答案</p>
             <div class="flex justify-center gap-2">
@@ -277,17 +292,51 @@
               <button id="answer-ai-btn" class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700" data-i18n="detail.aiAnswer">用 AI 生成答案</button>
             </div>
           </div>
-          <div id="answer-edit" class="hidden mt-2">
+
+          <!-- 生成/修正状态：放在工具区**外面**，因为空态下工具区是隐藏的，
+               而首次「用 AI 生成答案」的「生成中…」必须看得见 -->
+          <p id="answer-status" class="text-sm text-slate-500"></p>
+
+          <!-- 有答案时的操作区：重新生成 / 自然语言修正 / 编辑源码 -->
+          <div id="answer-tools" class="hidden mt-4 pt-3 border-t border-slate-100 space-y-2">
+            <div class="flex items-center gap-2 flex-wrap">
+              <button id="answer-regen-btn" class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50" data-i18n="detail.regenAnswer">重新生成</button>
+              <button id="answer-edit-btn" class="px-3 py-1.5 text-sm bg-slate-100 text-slate-700 rounded hover:bg-slate-200" data-i18n="detail.editAnswer">编辑答案</button>
+            </div>
+            <div class="flex gap-2">
+              <input id="answer-correct-input" type="text" placeholder="如：第二步的符号错了，重新算一下" data-i18n-ph="detail.answerCorrectPh"
+                     class="flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" />
+              <button id="answer-correct-btn" class="px-4 py-2 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700 disabled:opacity-50" data-i18n="detail.answerCorrectBtn">提交修正</button>
+            </div>
+            <p class="text-xs text-slate-400" data-i18n="detail.answerCorrectHint">
+              用自然语言说明哪里不对，AI 会基于当前解答改；点「重新生成」则换一种思路重解。
+            </p>
+          </div>
+
+          <!-- 直接编辑答案源码 -->
+          <div id="answer-edit" class="hidden mt-3">
             <textarea id="answer-input" rows="5" placeholder="输入答案内容（支持 \( \) 和 \[ \] 公式）" data-i18n-ph="detail.answerPh"
                       class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm font-mono"></textarea>
             <div class="flex items-center gap-2 mt-2">
               <button id="answer-save-btn" class="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded hover:bg-emerald-700" data-i18n="detail.saveAnswer">保存答案</button>
               <button id="answer-cancel-btn" class="px-3 py-1.5 text-sm text-slate-500 hover:text-slate-700" data-i18n="detail.cancel">取消</button>
-              <span id="answer-status" class="text-sm text-slate-500"></span>
+              <span id="answer-edit-status" class="text-sm text-slate-500"></span>
             </div>
           </div>
-          <div class="mt-3">
-            <button id="answer-edit-btn" class="hidden text-xs text-slate-400 hover:text-blue-600" data-i18n="detail.editAnswer">编辑答案</button>
+        </div>
+
+        <!-- 学科（可改）：改完会同步替换旧的学科标签 -->
+        <div class="mt-4 pt-4 border-t border-slate-100">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-xs text-slate-400" data-i18n="detail.subject">学科：</span>
+            <select id="detail-subject-select"
+                    class="choice-box choice-box-sm border border-slate-300 rounded px-2 py-0.5 text-xs bg-white focus:outline-none focus:border-blue-500">
+              <option value="数学" data-i18n="subject.math">数学</option>
+              <option value="物理" data-i18n="subject.physics">物理</option>
+              <option value="化学" data-i18n="subject.chemistry">化学</option>
+              <option value="" data-i18n="card.uncategorized">未分类</option>
+            </select>
+            <span id="subject-status" class="text-xs text-slate-500"></span>
           </div>
         </div>
 
