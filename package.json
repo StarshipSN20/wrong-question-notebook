@@ -1,6 +1,6 @@
 {
   "name": "wrong-question-notebook",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "数理化错题本 (Electron + FastAPI + SQLite)",
   "main": "main.js",
   "scripts": {
@@ -33,7 +33,9 @@
       }
     ],
     "win": {
-      "target": ["nsis"],
+      "target": [
+        "nsis"
+      ],
       "artifactName": "MistakeNotebook-${version}-setup.${ext}"
     },
     "nsis": {
@@ -44,7 +46,9 @@
     },
     "afterPack": "scripts/afterPack.js",
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.education",
       "artifactName": "MistakeNotebook-${version}-${arch}.${ext}",
       "identity": null

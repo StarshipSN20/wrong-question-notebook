@@ -4,8 +4,11 @@
 
 | 平台 | 命令 | 产物 |
 |------|------|------|
-| Windows | `npm run dist:win` | `release/MistakeNotebook-0.2.0-setup.exe`（NSIS 安装包） |
-| macOS | `npm run dist:mac` | `release/MistakeNotebook-0.2.0.dmg`（需在 Mac 上执行） |
+| Windows | `npm run dist:win` | `release/MistakeNotebook-<版本>-setup.exe`（NSIS 安装包） |
+| macOS | `npm run dist:mac` | `release/MistakeNotebook-<版本>-<arch>.dmg`（需在 Mac 上执行） |
+
+版本号取自 `package.json` 的 `version`；macOS 产物名带 arch（如 `-arm64`），
+因为 PyInstaller 打出的后端二进制是跟着构建机架构走的，不同架构不能混用。
 
 免安装版在 `release/win-unpacked/`（Windows 可直接运行其中的 `数理化错题本.exe`）。
 
@@ -35,7 +38,7 @@
 cd backend && pip install -r requirements.txt pyinstaller && pyinstaller backend.spec --noconfirm
 cd .. && npm install && npm run dist:mac
 ```
-产物在 `release/MistakeNotebook-0.2.0.dmg`。
+产物在 `release/MistakeNotebook-<版本>-<arch>.dmg`。
 
 **方式二：没有 Mac**（用 GitHub Actions 免费 macOS 服务器，无需本地 Mac）
 项目已内置 `.github/workflows/build-mac.yml`：
