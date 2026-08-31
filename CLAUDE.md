@@ -184,6 +184,31 @@ python -m PyInstaller.utils.cliutils.archive_viewer -l dist/mistake-backend.exe 
 是 `archive_viewer` 抓到的；三项"已完成"的改动其实从未落盘，是重新打包产物名还是中文
 才暴露的。声明与验证是两件事，报告时把两者分开说。
 
+## macOS「已损坏」≠ Gatekeeper 拦截
+
+用户装 dmg 报「已损坏，无法打开」，而且**把「允许任何来源」打开也没用**。
+别往 Gatekeeper 方向查——那是两个不同的拦截点：
+
+| 提示 | 原因 | 隐私设置能否放行 |
+|------|------|------------------|
+| 来自身份不明的开发者 | 有签名但非 Apple 认证 | 能（「仍要打开」） |
+| **已损坏，无法打开** | **完全没有签名** | **不能** |
+
+Apple Silicon 上内核直接拒绝加载无签名的 arm64 二进制，压根到不了 Gatekeeper 那一步。
+CI 日志里 `skipped macOS application code signing` + `arch=arm64` 就是这个坑的信号。
+
+解法是 **ad-hoc 签名**（`codesign --sign -`），不需要任何 Apple 证书，
+已实现在 `scripts/afterPack.js`（electron-builder 的 `afterPack` 钩子）。两个要点：
+
+1. **签名顺序必须从内到外**：先签 `Resources/backend/mistake-backend`（PyInstaller
+   产物，走 extraResources 放在非标准位置，`--deep` 不保证覆盖），最后签 `.app` 外壳。
+   反了会破坏外壳封印，签完又失效。
+2. **CI 里要断言 `Signature=adhoc`**，不能只看构建成功。
+   工作流有 `Verify ad-hoc signature` 一步，签名没生效就直接失败——
+   否则又是「声明成功但产物是坏的」，只有用户装的时候才发现。
+
+另外 quarantine 属性也会报同样的「已损坏」，用户侧 `xattr -cr` 清掉，见 BUILD.md。
+
 ## 环境
 
 - Python：`backend/venv/Scripts/python.exe`（conda 基座，3.13）
