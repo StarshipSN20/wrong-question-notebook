@@ -51,6 +51,35 @@ git branch -M main
 git push -u origin main
 ```
 
+## macOS 报「已损坏，无法打开」怎么办
+
+这是**没有签名**导致的，不是文件真的坏了。两个原因，可能同时存在：
+
+**原因一：缺少签名（Apple Silicon 必然触发）**
+Apple Silicon（M 系列芯片）上，macOS 内核**拒绝加载完全没有签名的 arm64 二进制**，
+Finder 就报「已损坏」。这和「来自身份不明的开发者」是**两回事**：
+- 「身份不明的开发者」→ 可以在「隐私与安全性」里点「仍要打开」放行；
+- 「已损坏」→ **改任何隐私设置都没用**，因为二进制根本没被加载。
+
+项目已通过 `scripts/afterPack.js` 打 **ad-hoc 签名**（`codesign --sign -`）解决，
+不需要 Apple 开发者证书。CI 里有一步 `Verify ad-hoc signature` 专门校验它生效，
+所以新构建的 dmg 不该再出现这个问题。
+
+**原因二：隔离属性（quarantine）**
+从浏览器 / GitHub 下载的 dmg 会被打上 `com.apple.quarantine`，
+未签名（或仅 ad-hoc 签名）时也可能报「已损坏」。用户侧一行命令清掉：
+
+```bash
+# 对下载到的 dmg 执行（路径换成实际位置）
+xattr -d com.apple.quarantine ~/Downloads/MistakeNotebook-0.2.0-arm64.dmg
+
+# 若已经拖进「应用程序」后才报错，对 .app 执行：
+xattr -cr /Applications/MistakeNotebook.app
+```
+
+之后正常双击即可。若仍提示「身份不明的开发者」，
+去「系统设置 → 隐私与安全性」点「仍要打开」——那一步才是这个设置管的。
+
 ## 注意事项
 
 - **macOS 上 PyInstaller 的 conda DLL 问题不存在**（mac 是 dylib 且 PyInstaller

@@ -37,7 +37,7 @@ from models import (
     ProblemOut,
     ProblemUpdate,
 )
-from services import ai_client, exporter, scheduler
+from services import ai_client, effort, exporter, scheduler, textfix
 
 # 支持的图片扩展名 → MIME（走多模态 vision）。
 IMAGE_MIME = {
@@ -58,18 +58,31 @@ LANGUAGE_RULE = (
     "严禁把题目翻译成另一种语言，也严禁中英混杂。\n"
 )
 
-# 统一的格式规则：确保前端 KaTeX 能正确渲染，且多题不会挤在一起。
-FORMAT_RULES = (
+# ---------------------------------------------------------------------------
+# 提示词：所有 AI 调用点共用一份格式契约
+# ---------------------------------------------------------------------------
+# 【为什么必须统一】前端只有一套渲染方式（KaTeX 扫 \( \) 与 \[ \]），
+# 所以所有 AI 产出的文本都必须是同一种格式。曾经分成两套——识图/举一反三要 JSON、
+# 生成答案要纯文本——结果模型按 JSON 那套输出答案，库里存进了整坨
+# {"latex_code":"..."}，前端渲染出一堆源码。
+#
+# 现在的做法：**所有调用点都要 JSON 信封**，都用 textfix.parse_ai_json 解析。
+# 理由是模型天然倾向返回 JSON（拦不住），而 JSON 的转义规则是确定的，
+# 配上 textfix 的非法转义修复就能稳定拿到正文；反过来「求模型别用 JSON」是碰运气。
+FORMAT_CONTRACT = (
     "严格遵守以下格式规则：\n"
     "1. 所有数学/物理/化学公式必须用 \\\\( \\\\) 包裹行内公式、用 \\\\[ \\\\] 包裹行间公式；"
-    "禁止使用 $ … $、$$ … $$、\\\\begin{equation} 等任何其它公式定界符。\n"
-    "2. 如果内容里有多道题，每道题各占一段，题与题之间用换行符 \\n 分隔，并在每题开头标注序号（如 1.、2.、3.）。\n"
-    "3. latex_code 是 JSON 字符串，LaTeX 里的反斜杠必须按 JSON 规则转义（例如 \\\\frac 写成 \\\\\\\\frac）。\n"
+    "禁止使用 $ … $、$$ … $$、\\\\begin{equation}、\\\\begin{align} 等任何其它公式定界符。\n"
+    "2. 内容里有多个部分（多道题、多个小问、多个解题步骤）时，每部分各占一段，"
+    "段与段之间用换行符 \\n 分隔，并保留原有编号（如 1.、2.、(a)、(i)）。\n"
+    "3. 返回值是 JSON 字符串，LaTeX 里的反斜杠必须按 JSON 规则转义："
+    "\\\\frac 要写成 \\\\\\\\frac，\\\\( 要写成 \\\\\\\\(。"
+    "这一条最容易出错——反斜杠没转义会导致 JSON 解析失败、公式无法显示。\n"
     "4. 只返回一个 JSON 对象，不要输出任何解释、前后缀或 Markdown 代码块标记。\n"
     + LANGUAGE_RULE
 )
 
-# JSON 字段说明（OCR 与文本整理共用）。
+# 录入类调用（识图 / 文本整理）的字段说明。
 JSON_SPEC = (
     "JSON 字段如下：\n"
     '{"subject": "数学/物理/化学 之一", '
@@ -85,13 +98,25 @@ JSON_SPEC = (
     "不受上述语言一致性规则约束——即使题目是英文，subject 也必须是中文。\n"
 )
 
+# 单字段调用（生成答案 / 修正题目）的字段说明。
+# 同样是 JSON 信封，与录入类保持一致，只是字段少。
+ANSWER_SPEC = (
+    "JSON 字段如下：\n"
+    '{"answer_latex": "完整解答（遵守上述格式规则）"}\n'
+)
+
+QUESTION_SPEC = (
+    "JSON 字段如下：\n"
+    '{"latex_code": "修正后的完整题目内容（遵守上述格式规则）"}\n'
+)
+
 OCR_PROMPT = (
-    "你是一个数理化错题识别助手。请识别图片中的全部题目。\n" + FORMAT_RULES + JSON_SPEC
+    "你是一个数理化错题识别助手。请识别图片中的全部题目。\n" + FORMAT_CONTRACT + JSON_SPEC
 )
 
 TEXT_PROMPT = (
     "你是一个数理化错题整理助手。请整理下面从文件中提取的题目文本。\n"
-    + FORMAT_RULES
+    + FORMAT_CONTRACT
     + JSON_SPEC
     + "\n\n提取到的文本如下：\n"
 )
@@ -148,6 +173,32 @@ def _normalize_subject(subject: Optional[str]) -> Optional[str]:
         return subject
     s = subject.strip()
     return SUBJECT_ALIASES.get(s.lower(), s)
+
+
+# 学科枚举（库里的合法取值）；同步学科标签时用它判断哪些标签是「学科标签」。
+SUBJECT_ENUM = ("数学", "物理", "化学")
+
+
+def _sync_subject_tag(
+    tags_json: Optional[str], old_subject: Optional[str], new_subject: Optional[str]
+) -> List[str]:
+    """改学科时同步学科标签：摘掉旧学科标签，把新学科放到最前面。
+
+    只动学科枚举内的标签（数学/物理/化学）和旧学科本身，用户自定义的
+    知识点标签一律保留、顺序不变。
+    """
+    try:
+        tags = json.loads(tags_json) if tags_json else []
+    except (json.JSONDecodeError, TypeError):
+        tags = []
+    if not isinstance(tags, list):
+        tags = []
+
+    drop = set(SUBJECT_ENUM)
+    if old_subject:
+        drop.add(old_subject)
+    kept = [tag for tag in tags if isinstance(tag, str) and tag not in drop]
+    return ([new_subject] + kept) if new_subject else kept
 
 
 def _split_q_a(content: str) -> tuple[str, Optional[str]]:
@@ -208,59 +259,24 @@ def _fetch_problem(conn, problem_id: int):
 
 
 def _parse_ai_json(text: str) -> dict:
-    """从 AI 返回文本中解析出 JSON 对象，容忍 Markdown 代码块包裹。"""
-    cleaned = text.strip()
-    # 去掉 ```json ... ``` 或 ``` ... ``` 包裹
-    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", cleaned, re.DOTALL)
-    if fence:
-        cleaned = fence.group(1).strip()
-    try:
-        data = json.loads(cleaned)
-        if isinstance(data, dict):
-            return data
-    except json.JSONDecodeError:
-        pass
-    # 兜底：尝试截取第一个 { 到最后一个 }
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            data = json.loads(cleaned[start : end + 1])
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError:
-            pass
-    # 实在解析不出，退回把整段文本当题目内容。
+    """解析录入类调用返回的 JSON（识图 / 文本整理 / 举一反三共用）。
+
+    统一走 textfix.parse_ai_json：它会先修 LaTeX 造成的非法 JSON 转义
+    （`"\\("` 不是合法转义，模型经常这么写，不修就整段解析失败），
+    再按需做截断兜底。彻底拿不到才退回「整段文本当题目」。
+    """
+    data = textfix.parse_ai_json(
+        text, keys=("latex_code", "answer_latex", "raw_text")
+    )
+    if data:
+        return data
     return {"raw_text": text, "latex_code": text, "subject": None, "tags": []}
 
 
-def _sanitize_latex(latex: str) -> str:
-    """后处理 AI 生成的 LaTeX，修复常见格式偏差。
-
-    即使提示词要求了 \\( \\) / \\[ \\]，某些模型仍可能输出
-    $…$、$$…$$、\\begin{equation} 等格式——这些 KaTeX 也能渲染，
-    但为了统一和避免嵌套冲突，统一转成 \\( \\) / \\[ \\]。
-    """
-    if not latex:
-        return latex
-
-    # 行间：\begin{equation} / \begin{equation*} / \begin{align} / \begin{align*} → \[
-    latex = re.sub(r"\\begin\{equation\*?\}", r"\\[", latex)
-    latex = re.sub(r"\\end\{equation\*?\}", r"\\]", latex)
-    latex = re.sub(r"\\begin\{align\*?\}", r"\\[", latex)
-    latex = re.sub(r"\\end\{align\*?\}", r"\\]", latex)
-    latex = re.sub(r"\\begin\{aligned\*?\}", r"\\[\\begin{aligned}", latex)
-    latex = re.sub(r"\\end\{aligned\*?\}", r"\\end{aligned}\\]", latex)
-
-    # 行间：$$ … $$ → \[ … \]（避免与 KaTeX 的 $$ 分隔符产生冲突）
-    latex = re.sub(r"\$\$\s*(.+?)\s*\$\$", r"\\[\1\\]", latex, flags=re.DOTALL)
-
-    # 行内：$ … $ → \( … \)
-    latex = re.sub(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", r"\\(\1\\)", latex)
-
-    # 清理多余空行（连续 3+ 个换行 → 2 个）
-    latex = re.sub(r"\n{3,}", "\n\n", latex)
-
-    return latex
+# 文本收敛与定界符统一都放在 services/textfix.py（database.py 的老数据迁移也要用，
+# 放这里会循环导入）。这两个别名保持原有调用点不动。
+_coerce_ai_text = textfix.coerce_ai_text
+_sanitize_latex = textfix.sanitize_latex
 
 
 def _extract_pdf_text(path: Path) -> str:
@@ -409,12 +425,25 @@ def update_problem(problem_id: int, patch: ProblemUpdate) -> ProblemOut:
         if patch.answer_latex is not None:
             fields.append("answer_latex = ?")
             values.append(patch.answer_latex)
+
+        # 学科：归一化成中文枚举（英文界面改学科时前端也可能传英文），
+        # 空串视为「清空学科」→ NULL。
+        new_subject = None
         if patch.subject is not None:
+            new_subject = _normalize_subject(patch.subject) or None
             fields.append("subject = ?")
-            values.append(patch.subject)
+            values.append(new_subject)
+
+        # 标签：调用方显式传 tags 时以它为准；否则改学科要顺带同步学科标签
+        # （录入时自动附加过学科标签，不同步会留下旧学科的标签，
+        #  导致按标签搜索把同一道题算进旧学科）。
         if patch.tags is not None:
             fields.append("tags = ?")
             values.append(json.dumps(patch.tags, ensure_ascii=False))
+        elif patch.subject is not None:
+            synced = _sync_subject_tag(row["tags"], row["subject"], new_subject)
+            fields.append("tags = ?")
+            values.append(json.dumps(synced, ensure_ascii=False))
 
         if fields:
             values.append(problem_id)
@@ -472,6 +501,53 @@ def save_config(cfg: ConfigModel) -> ConfigModel:
     """保存 AI 配置。"""
     saved = config.write_config(cfg.model_dump())
     return ConfigModel(**saved)
+
+
+@app.get("/api/effort/levels")
+def effort_levels(
+    model: Optional[str] = None, requested: Optional[str] = None
+) -> dict:
+    """返回推理强度档位信息，供「设置」页构建下拉框。
+
+    model     ：缺省时用当前配置里的模型。
+    requested ：缺省时用配置里已存的档位。传入下拉框里**当前选中**的档位，
+                就能在用户还没点保存时就告诉他「这一档会被降级成 X」。
+
+    返回的 source 说明可信度：
+    probe（真实探测过）> learned（调用中撞过墙）> catalog（已知表）> default（未知）。
+    effective 是实际会发给上游的档位（auto 表示不发送该参数），
+    由 effort.resolve() 统一计算——前端不再自己复制一份降级规则。
+    """
+    cfg = config.read_config()
+    target = (model or cfg.get("model_name") or "").strip()
+    info = effort.describe(cfg.get("base_url", ""), target)
+    want = requested if requested is not None else cfg.get("reasoning_effort", "auto")
+    supported = None if info["source"] == "default" else info["supported"]
+    info["requested"] = want
+    info["effective"] = effort.resolve(want, supported) or effort.AUTO
+    return info
+
+
+@app.post("/api/effort/probe")
+async def effort_probe() -> dict:
+    """真实探测当前模型支持哪些档位（每档发一次极小请求），结果写入缓存。"""
+    try:
+        return await ai_client.probe_efforts()
+    except ai_client.AIConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ai_client.AIRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/api/models")
+async def list_upstream_models() -> dict:
+    """拉上游可用模型列表（GET {base_url}/models），供「设置」页下拉选择。"""
+    try:
+        return {"models": await ai_client.list_models()}
+    except ai_client.AIConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ai_client.AIRequestError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -561,13 +637,12 @@ async def correct_latex(req: CorrectLatexRequest) -> ProblemOut:
 
     current_latex = row["latex_code"] or row["raw_text"] or ""
     prompt = (
-        "你是一个 LaTeX 题目修正助手。下面是当前题目的 LaTeX 代码，请根据用户的修改要求"
-        "输出修正后的完整 LaTeX 代码。\n"
-        "公式一律用 \\( \\) 包裹行内、\\[ \\] 包裹行间，禁止使用 $ 或 $$；多道题之间用换行符分隔。\n"
-        "【语言一致性】修正后的内容必须与原题语言保持一致，不要翻译成其它语言。\n"
-        "只返回修正后的 LaTeX 代码本身，不要任何解释，不要 Markdown 代码块标记。\n\n"
-        f"当前 LaTeX：\n{current_latex}\n\n"
-        f"用户修改要求：{req.user_feedback}"
+        "你是一个 LaTeX 题目修正助手。下面是当前题目的内容，请根据用户的修改要求"
+        "输出修正后的完整内容。\n"
+        + FORMAT_CONTRACT
+        + QUESTION_SPEC
+        + f"\n当前内容：\n{current_latex}\n\n"
+        + f"用户修改要求：{req.user_feedback}"
     )
 
     try:
@@ -577,11 +652,12 @@ async def correct_latex(req: CorrectLatexRequest) -> ProblemOut:
     except ai_client.AIRequestError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    corrected = corrected.strip()
-    # 去掉可能的代码块包裹
-    fence = re.match(r"^```(?:latex)?\s*(.*?)\s*```$", corrected, re.DOTALL)
-    if fence:
-        corrected = fence.group(1).strip()
+    # 与录入/生成答案同一个解析器。
+    parsed = textfix.parse_ai_json(corrected, keys=("latex_code", "answer_latex"))
+    fixed = parsed.get("latex_code") or ""
+    if not isinstance(fixed, str) or not fixed.strip():
+        fixed = _coerce_ai_text(corrected)
+    corrected = _sanitize_latex(fixed)
 
     conn = database.get_connection()
     try:
@@ -607,16 +683,46 @@ async def generate_answer(req: GenerateAnswerRequest) -> ProblemOut:
     if row is None:
         raise HTTPException(status_code=404, detail="错题不存在")
 
-    question, _ = _split_q_a(row["latex_code"] or row["raw_text"] or "")
+    question, split_answer = _split_q_a(row["latex_code"] or row["raw_text"] or "")
     if not question:
         raise HTTPException(status_code=400, detail="题目内容为空，无法生成答案")
 
+    current = (row["answer_latex"] or split_answer or "").strip()
+    feedback = (req.user_feedback or "").strip()
+
+    # 三种任务：按用户修正意见改 / 换一版重写 / 首次生成。
+    # 格式约束不在这里，统一由下面的 FORMAT_CONTRACT + ANSWER_SPEC 提供。
+    if feedback and current:
+        task = (
+            "下面是一道题和它当前的解答。请按用户的修改要求给出修正后的**完整**解答，"
+            "保留正确的部分，只改需要改的地方。\n"
+        )
+        context = f"当前解答：\n{current}\n\n用户修改要求：{feedback}"
+    elif feedback:
+        task = (
+            "请为下面这道题写出完整、清晰的解答步骤，并额外满足用户的具体要求。\n"
+        )
+        context = f"用户要求：{feedback}"
+    elif req.regenerate and current:
+        task = (
+            "下面是一道题和它当前的解答。用户对当前解答不满意，请**重新独立解一遍**："
+            "换一种思路或更清晰的表述，步骤写得更完整；不要照抄当前解答。\n"
+        )
+        context = f"当前解答（不满意，仅供参考避免重复）：\n{current}"
+    else:
+        task = (
+            "请为下面这道题写出完整、清晰的解答步骤，包含必要的公式推导与最终答案。\n"
+        )
+        context = ""
+
+    # 与识图/举一反三完全同一套格式契约 + JSON 信封，保证渲染格式一致。
     prompt = (
-        "你是一个数理化解题助手。请为下面这道题写出完整、清晰的解答步骤，"
-        "包含必要的公式推导与最终答案。\n"
-        + FORMAT_RULES
-        + "\n只返回解答内容本身，不要任何解释，不要 Markdown 代码块标记。\n\n"
-        + f"题目：\n{question}"
+        "你是一个数理化解题助手。"
+        + task
+        + FORMAT_CONTRACT
+        + ANSWER_SPEC
+        + f"\n题目：\n{question}\n"
+        + (f"\n{context}\n" if context else "")
     )
 
     try:
@@ -626,12 +732,13 @@ async def generate_answer(req: GenerateAnswerRequest) -> ProblemOut:
     except ai_client.AIRequestError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-    # 去掉可能的代码块包裹
-    cleaned = ai_text.strip()
-    fence = re.match(r"^```(?:latex)?\s*(.*?)\s*```$", cleaned, re.DOTALL)
-    if fence:
-        cleaned = fence.group(1).strip()
-    answer = _sanitize_latex(cleaned) or None
+    # 与录入路径同一个解析器：修非法转义 → 取字段 → 统一定界符。
+    parsed = textfix.parse_ai_json(ai_text, keys=("answer_latex", "latex_code"))
+    answer = parsed.get("answer_latex") or parsed.get("latex_code") or ""
+    if not isinstance(answer, str) or not answer.strip():
+        # 模型没按信封走（少数情况）→ 退回单段正文收敛，仍能拿到可渲染的内容。
+        answer = _coerce_ai_text(ai_text)
+    answer = _sanitize_latex(answer) or None
 
     conn = database.get_connection()
     try:
@@ -675,20 +782,16 @@ async def generate_similar(req: GenerateSimilarRequest) -> ProblemOut:
 
     source = row["latex_code"] or row["raw_text"] or ""
     subject = row["subject"]
+    # 格式要求与识图/生成答案完全一致（FORMAT_CONTRACT 已含反斜杠转义、
+    # 定界符、禁代码块等全部约束，这里不再重复叮嘱一遍）。
     prompt = (
         "你是一个数理化出题助手。"
         + task
         + "\n新题必须附带完整解题步骤。\n"
-        + FORMAT_RULES
+        + FORMAT_CONTRACT
         + JSON_SPEC
-        + "\n特别要求：latex_code 内先写【题目】再写【解答】，两部分之间用换行分隔。\n"
-        + "\n！！！重要警告！！！\n"
-        + "- 严禁在 JSON 的 latex_code 字符串内使用未转义的反斜杠（如 \\frac 在 JSON 中必须写作 \\\\frac），否则前端 KaTeX 渲染会失败。\n"
-        + "- 严禁使用 $…$ 或 $$…$$ 作为公式分隔符，必须使用 \\(…\\) 和 \\[…\\]。\n"
-        + "- 严禁使用 \\begin{equation} 或 \\begin{align} 环境，必须用 \\[ … \\] 替代。\n"
-        + "- 只输出纯 JSON 对象，禁止包裹在 ```json 代码块或任何其他标记中。\n"
-        + "\n"
-        + f"原题（学科：{subject or '未知'}）：\n{source}"
+        + "\n特别要求：题干写进 latex_code，解答写进 answer_latex，不要把两者混在一个字段里。\n"
+        + f"\n原题（学科：{subject or '未知'}）：\n{source}"
     )
 
     try:
@@ -699,15 +802,24 @@ async def generate_similar(req: GenerateSimilarRequest) -> ProblemOut:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     parsed = _parse_ai_json(ai_text)
+    # 题干与解答现在分字段返回（与识图路径一致）。老提示词是把两者塞进
+    # latex_code 再靠【题目】/【解答】标记拆分，这里兜一下：若模型仍混在一起，
+    # _split_q_a 能把解答摘出来，不至于丢答案。
+    question = _sanitize_latex(parsed.get("latex_code") or "")
+    answer = _sanitize_latex(parsed.get("answer_latex") or "")
+    if not answer:
+        question, split_answer = _split_q_a(question)
+        answer = split_answer or ""
     return _insert_problem(
         image_path=None,
         raw_text=parsed.get("raw_text"),
-        latex_code=_sanitize_latex(parsed.get("latex_code") or ""),
+        latex_code=question,
         subject=parsed.get("subject") or subject,
         tags=parsed.get("tags") or [],
         raw_image_hash=None,
         is_generated=True,
         parent_id=req.problem_id,
+        answer_latex=answer or None,
     )
 
 

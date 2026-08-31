@@ -83,9 +83,17 @@ class GenerateSimilarRequest(BaseModel):
 
 
 class GenerateAnswerRequest(BaseModel):
-    """用 AI 为题目生成答案的入参。"""
+    """用 AI 为题目生成/重新生成/修正答案的入参。
+
+    三种用法（与「录入/编辑」页的题目流程对齐）：
+    - 首次生成    ：只传 problem_id。
+    - 换一版重新生成：regenerate=True，会要求 AI 换一种思路重写。
+    - 自然语言修正 ：user_feedback="第二步的符号错了"，基于现有答案改。
+    """
 
     problem_id: int
+    user_feedback: Optional[str] = None
+    regenerate: bool = False
 
 
 class ExportRequest(BaseModel):

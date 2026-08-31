@@ -42,10 +42,12 @@
       "createDesktopShortcut": true,
       "shortcutName": "Mistake Notebook"
     },
+    "afterPack": "scripts/afterPack.js",
     "mac": {
       "target": ["dmg"],
       "category": "public.app-category.education",
-      "artifactName": "MistakeNotebook-${version}.${ext}"
+      "artifactName": "MistakeNotebook-${version}-${arch}.${ext}",
+      "identity": null
     }
   }
 }
