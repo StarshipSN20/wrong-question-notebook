@@ -1,5 +1,50 @@
 // 前端逻辑：与本地 FastAPI 通信、渲染错题卡片与公式、录入/设置交互。
 
+// 并发请求队列：批量上传多张图片时限流（最大并发 3、请求间隔 ≥200ms），
+// 避免一次性把 AI 网关打爆。失败不重试，由调用方处理。
+// 内联在这里而不是单独文件：render.js 是普通 <script>，不能 import ES module。
+class RequestQueue {
+  constructor(maxConcurrent = 3, minDelay = 200) {
+    this.maxConcurrent = maxConcurrent;
+    this.minDelay = minDelay;
+    this.queue = [];
+    this.running = 0;
+    this.lastRequest = 0;
+  }
+
+  async add(fn) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ fn, resolve, reject });
+      this._processNext();
+    });
+  }
+
+  async _processNext() {
+    if (this.running >= this.maxConcurrent || !this.queue.length) return;
+
+    const { fn, resolve, reject } = this.queue.shift();
+    this.running++;
+
+    const elapsed = Date.now() - this.lastRequest;
+    if (elapsed < this.minDelay) {
+      await new Promise((r) => setTimeout(r, this.minDelay - elapsed));
+    }
+    this.lastRequest = Date.now();
+
+    try {
+      const result = await fn();
+      resolve(result);
+    } catch (err) {
+      reject(err);
+    } finally {
+      this.running--;
+      this._processNext();
+    }
+  }
+}
+
+const aiQueue = new RequestQueue(3, 200);
+
 const API_BASE = "http://127.0.0.1:8000";
 
 // 视图 → 标题的 i18n key（标题随语言切换，见 i18n.js）。
@@ -23,10 +68,12 @@ const SUBJECT_COLORS = {
   化学: "bg-purple-100 text-purple-700",
 };
 
-// 录入页当前正在编辑的错题（识别/修正/更新共享）
-let currentProblem = null;
-// 待上传的文件
-let pendingFile = null;
+// 录入页：待上传的文件（支持多选批量上传）
+let pendingFiles = [];
+// 批量上传结果：{successes: [{data: ProblemOut, file}], errors: [{file, error}]}
+let batchResults = { successes: [], errors: [] };
+// 结果区当前活动的标签页 ID（tab-<problemId>）
+let activeTabId = null;
 // 已加载的错题缓存（id → ProblemOut），供详情弹窗用
 const problemsCache = new Map();
 // 详情弹窗当前显示的题目
@@ -74,6 +121,25 @@ function parentSeq(parentId) {
   return parent && parent.seq ? parent.seq : parentId;
 }
 
+// 题型徽标：库里存 MC/TF/SAQ/LAQ 枚举，界面按语言显示
+const QUESTION_TYPE_KEYS = {
+  MC: "questionType.mc",
+  TF: "questionType.tf",
+  SAQ: "questionType.saq",
+  LAQ: "questionType.laq",
+};
+
+// 题目原图路径：只要上传过图片就展示（不依赖 has_diagram，
+// 那个标志只影响 AI 生成答案时是否附图）。
+function problemImagePath(problem) {
+  return problem.diagram_path || problem.image_path || "";
+}
+
+// 题目正文（题目部分；答案在详情弹窗里另看）
+function problemText(problem) {
+  return problem.question_latex || problem.latex_code || problem.raw_text || t("card.noText");
+}
+
 function renderCard(problem) {
   const subjectClass =
     SUBJECT_COLORS[problem.subject] || "bg-slate-100 text-slate-700";
@@ -87,14 +153,22 @@ function renderCard(problem) {
     )
     .join(" ");
 
-  // 预览只用题目部分；答案在详情弹窗里看
-  const content =
-    problem.question_latex || problem.latex_code || problem.raw_text || t("card.noText");
+  const content = problemText(problem);
 
   const generatedBadge = problem.is_generated
     ? `<span class="inline-block px-2 py-0.5 text-xs rounded bg-amber-100 text-amber-700">${escapeHtml(
         t("card.fromParent", { n: parentSeq(problem.parent_id) })
       )}</span>`
+    : "";
+
+  const typeKey = QUESTION_TYPE_KEYS[problem.question_type];
+  const typeBadge = typeKey
+    ? `<span class="inline-block px-2 py-0.5 text-xs rounded bg-slate-200 text-slate-600">${escapeHtml(t(typeKey))}</span>`
+    : "";
+
+  const imagePath = problemImagePath(problem);
+  const imageHtml = imagePath
+    ? `<div class="mb-3"><img src="${escapeHtml(imagePath)}" class="max-w-full h-auto rounded border border-slate-200" alt="" style="max-height: 200px;" /></div>`
     : "";
 
   return `
@@ -105,6 +179,7 @@ function renderCard(problem) {
           <span class="inline-block px-2 py-0.5 text-xs rounded ${subjectClass}">${escapeHtml(
     subjectLabel(problem.subject)
   )}</span>
+          ${typeBadge}
           ${generatedBadge}
         </div>
         <div class="flex items-center gap-2">
@@ -114,6 +189,7 @@ function renderCard(problem) {
           )}" title="${escapeHtml(t("card.delete"))}">✕</button>
         </div>
       </div>
+      ${imageHtml}
       <div class="latex-content text-sm text-slate-700 mb-3 line-clamp-3">${escapeHtml(
         content
       )}</div>
@@ -249,11 +325,23 @@ function renderDetail(p) {
     badge.classList.add("hidden");
   }
 
-  // 题目面板：只用题目部分
+  // 题目面板：原图（若有）+ 题目内容。用 textContent 写正文再交给 KaTeX，
+  // 既不会 XSS 也不会把题目里的 < 当标签。
   const content = document.getElementById("detail-content");
-  content.textContent =
-    p.question_latex || p.latex_code || p.raw_text || t("card.noText");
-  renderLatex(content);
+  content.innerHTML = "";
+  const imagePath = problemImagePath(p);
+  if (imagePath) {
+    const img = document.createElement("img");
+    img.src = imagePath;
+    img.className = "max-w-full h-auto rounded border border-slate-200 mb-4";
+    img.alt = "";
+    img.style.maxHeight = "400px";
+    content.appendChild(img);
+  }
+  const textDiv = document.createElement("div");
+  textDiv.textContent = problemText(p);
+  content.appendChild(textDiv);
+  renderLatex(textDiv);
 
   renderAnswerPanel();
   renderDetailTags();
@@ -681,8 +769,7 @@ async function loadReviewDue() {
     due.forEach((p) => problemsCache.set(p.id, p));
     container.innerHTML = due
       .map((p) => {
-        const content =
-          p.question_latex || p.latex_code || p.raw_text || t("card.noText");
+        const content = problemText(p);
         return `
           <div class="review-item bg-white rounded-lg border border-slate-200 p-4 flex items-start justify-between gap-4 cursor-pointer hover:border-blue-300"
                data-id="${escapeHtml(p.id)}">
@@ -739,45 +826,38 @@ function onReviewClick(e) {
 // ---------------------------------------------------------------------------
 async function loadExportList() {
   const container = document.getElementById("export-container");
-  container.innerHTML = `<p class="text-slate-400">${escapeHtml(
-    t("common.loading")
-  )}</p>`;
+  container.innerHTML = `<p class="text-slate-400">${escapeHtml(t("common.loading"))}</p>`;
   try {
     const res = await fetch(`${API_BASE}/api/problems`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const problems = await res.json();
     if (!problems.length) {
-      container.innerHTML = `<p class="text-slate-400 text-center py-16">${escapeHtml(
-        t("export.emptyHint")
-      )}</p>`;
+      container.innerHTML = `<p class="text-slate-400 text-center py-16">${escapeHtml(t("export.emptyHint"))}</p>`;
       return;
     }
     problems.forEach((p) => problemsCache.set(p.id, p));
-    container.innerHTML = problems
-      .map((p) => {
-        const content =
-          p.question_latex || p.latex_code || p.raw_text || t("card.noText");
-        return `
-          <div class="export-item flex items-start gap-3 bg-white rounded-lg border border-slate-200 p-3 cursor-pointer">
-            <input type="checkbox" class="export-cb mt-1" value="${escapeHtml(
-              p.id
-            )}" />
-            <div class="export-body min-w-0 flex-1" data-id="${escapeHtml(p.id)}">
-              <div class="text-xs text-slate-400 mb-1">#${escapeHtml(
-                p.seq || p.id
-              )} · ${escapeHtml(subjectLabel(p.subject))}</div>
-              <div class="latex-content text-sm text-slate-700 line-clamp-2">${escapeHtml(
-                content
-              )}</div>
-            </div>
-          </div>`;
-      })
-      .join("");
+    container.innerHTML = problems.map((p) => {
+      const content = problemText(p);
+      // 有原图的题目多一个「含图」勾选框（默认勾上），决定导出时是否嵌图
+      const imageCb = problemImagePath(p)
+        ? `<label class="flex items-center gap-1 text-xs text-slate-500 cursor-pointer shrink-0" title="${escapeHtml(t("export.includeImageTitle"))}">
+             <input type="checkbox" class="export-img-cb accent-blue-600" value="${escapeHtml(p.id)}" checked />
+             <span>${escapeHtml(t("export.includeImage"))}</span>
+           </label>`
+        : "";
+      return `
+        <div class="export-item flex items-start gap-3 bg-white rounded-lg border border-slate-200 p-3">
+          <input type="checkbox" class="export-cb mt-1 shrink-0" value="${escapeHtml(p.id)}" />
+          <div class="export-body min-w-0 flex-1" data-id="${escapeHtml(p.id)}">
+            <div class="text-xs text-slate-400 mb-1">#${escapeHtml(p.seq || p.id)} · ${escapeHtml(subjectLabel(p.subject))}</div>
+            <div class="latex-content text-sm text-slate-700 line-clamp-2">${escapeHtml(content)}</div>
+          </div>
+          ${imageCb}
+        </div>`;
+    }).join("");
     renderLatex(container);
   } catch (err) {
-    container.innerHTML = `<p class="text-red-400">${escapeHtml(
-      t("common.loadFailed", { msg: err.message })
-    )}</p>`;
+    container.innerHTML = `<p class="text-red-400">${escapeHtml(t("common.loadFailed", { msg: err.message }))}</p>`;
   }
 }
 
@@ -791,6 +871,16 @@ function getExportVersion() {
   return { include_answers: true, answers_last: false };
 }
 
+// 读取勾选了「含图」的题目 id 列表
+function getImageIds() {
+  return Array.from(
+    document.querySelectorAll("#export-container .export-img-cb:checked")
+  ).map((cb) => Number(cb.value));
+}
+
+// 导出 LaTeX：后端生成 .tex（无图）或 .zip（.tex + images/）。
+// 后端不再编译 PDF：PDF 一律走下面的 exportPDF()（Electron printToPDF），
+// 不依赖任何本机 TeX 发行版。
 async function exportSelected() {
   const ids = Array.from(
     document.querySelectorAll("#export-container .export-cb:checked")
@@ -801,6 +891,7 @@ async function exportSelected() {
   }
   const btn = document.getElementById("export-btn");
   btn.disabled = true;
+  btn.textContent = t("export.exporting");
   try {
     const res = await fetch(`${API_BASE}/api/export`, {
       method: "POST",
@@ -808,19 +899,20 @@ async function exportSelected() {
       body: JSON.stringify({
         problem_ids: ids,
         ...getExportVersion(),
-        // .tex 卷头语言跟随界面，避免英文界面导出中文卷头
         language: getLanguage(),
+        image_problem_ids: getImageIds(),
       }),
     });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       throw new Error(data.detail || `HTTP ${res.status}`);
     }
+    const contentType = res.headers.get("content-type") || "";
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "mistakes.tex";
+    a.download = contentType.includes("zip") ? "mistakes.zip" : "mistakes.tex";
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -829,10 +921,29 @@ async function exportSelected() {
     window.alert(t("export.failed", { msg: err.message }));
   } finally {
     btn.disabled = false;
+    btn.textContent = t("export.latexBtn");
   }
 }
 
-// 导出 PDF：构造打印用 HTML → 主进程 printToPDF → 保存对话框
+// 本地绝对路径 → file:// URL（打印页是 file:// 页面，可直接引用 uploads/ 下的原图）。
+function toFileUrl(p) {
+  if (!p) return "";
+  if (/^[a-z]+:\/\//i.test(p)) return p;
+  const normalized = p.replace(/\\/g, "/");
+  return "file://" + (normalized.startsWith("/") ? "" : "/") + encodeURI(normalized);
+}
+
+// 「不含答案」版的答题留白高度（cm），与后端 exporter.answer_space_cm 同一套规则：
+// MC/TF 不留白；SAQ 3cm + 按题长最多加 3cm；LAQ（及未识别）6cm + 最多加 6cm。
+function answerSpaceCm(questionType, question) {
+  if (questionType === "MC" || questionType === "TF") return 0;
+  const lines = (question || "").length / 80;
+  if (questionType === "SAQ") return 3 + Math.min(lines * 0.5, 3);
+  return 6 + Math.min(lines * 0.8, 6);
+}
+
+// 导出 PDF：构造打印用 HTML → 主进程 printToPDF → 保存对话框。
+// 纯 Electron 实现，不需要 XeLaTeX；勾了「含图」的题目把原图嵌进去。
 async function exportPDF() {
   const checked = Array.from(
     document.querySelectorAll("#export-container .export-cb:checked")
@@ -841,15 +952,17 @@ async function exportPDF() {
     window.alert(t("export.selectFirst"));
     return;
   }
+  const imageIds = new Set(getImageIds());
   const items = checked
     .map((id) => problemsCache.get(id))
     .filter(Boolean)
     .map((p) => ({
       id: p.id,
       subject: subjectLabel(p.subject),
-      question:
-        p.question_latex || p.latex_code || p.raw_text || t("pdf.noContent"),
+      question: problemText(p),
       answer: p.answer_latex || "",
+      questionType: p.question_type || null,
+      image: imageIds.has(p.id) ? toFileUrl(problemImagePath(p)) : "",
     }));
   if (!items.length) {
     window.alert(t("export.notLoaded"));
@@ -858,6 +971,7 @@ async function exportPDF() {
 
   const btn = document.getElementById("export-pdf-btn");
   btn.disabled = true;
+  btn.textContent = t("export.exporting");
   try {
     if (!window.pdfApi || typeof window.pdfApi.exportPdf !== "function") {
       throw new Error(t("export.pdfUnsupported"));
@@ -873,6 +987,7 @@ async function exportPDF() {
     window.alert(t("export.pdfFailed", { msg: err.message }));
   } finally {
     btn.disabled = false;
+    btn.textContent = t("export.pdfBtn");
   }
 }
 
@@ -891,11 +1006,24 @@ function buildPdfHtml(items) {
       t("pdf.problemNo", { n: num, subject: item.subject })
     );
     const answerLabel = escapeHtml(t("pdf.answerLabel"));
+    // 勾了「含图」的题目：原图放在题干前面（与 .tex 导出一致）
+    const img = item.image
+      ? `<div class="p-image"><img src="${escapeHtml(item.image)}" alt="" /></div>`
+      : "";
+    // 「不含答案」版：按题型给答题留白，让打印出来能直接做题
+    const spaceCm = !include_answers
+      ? answerSpaceCm(item.questionType, item.question)
+      : 0;
+    const space = spaceCm > 0
+      ? `<div class="p-space" style="height:${spaceCm.toFixed(1)}cm"></div>`
+      : "";
     return `
       <div class="problem">
         <div class="p-title">${title}</div>
+        ${img}
         <div class="p-body">${q}</div>
         ${withAnswer ? `<div class="p-answer"><div class="p-answer-label">${answerLabel}</div><div>${a}</div></div>` : ""}
+        ${space}
       </div>`;
   };
 
@@ -981,6 +1109,17 @@ function buildPdfHtml(items) {
   .p-body { font-size: 12pt; white-space: pre-wrap; text-align: justify; }
   .p-body p { margin: 0 0 1.5mm; }
 
+  /* 题目原图（勾选「含图」时）：限宽限高，不跨页 */
+  .p-image { margin: 0 0 3mm; text-align: center; }
+  .p-image img {
+    max-width: 100%;
+    max-height: 110mm;
+    border: 0.3pt solid #999;
+    page-break-inside: avoid;
+  }
+  /* 答题留白（不含答案版）：只占高度，不允许被压缩 */
+  .p-space { flex-shrink: 0; }
+
   /* 答案（含答案版）：灰色边框左侧竖线，像答案册 */
   .p-answer {
     margin-top: 3mm;
@@ -1034,75 +1173,225 @@ function setEditorStatus(msg, isError = false) {
   el.className = `ml-3 text-sm ${isError ? "text-red-500" : "text-slate-500"}`;
 }
 
-function showResult(problem) {
-  currentProblem = problem;
-  document.getElementById("result-area").classList.remove("hidden");
-  document.getElementById("result-subject").textContent = subjectLabel(
-    problem.subject
-  );
-  document.getElementById("result-id").textContent = `#${
-    problem.seq || problem.id
-  }`;
-
-  const render = document.getElementById("result-render");
-  render.textContent =
-    problem.latex_code || problem.raw_text || t("editor.empty");
-  renderLatex(render);
-
-  document.getElementById("latex-textarea").value = problem.latex_code || "";
-}
-
-function handleFileSelected(file) {
-  if (!file) return;
-  pendingFile = file;
+// 选中文件（可多选）：列出文件名与大小，启用「开始识别」
+function handleFileSelected(files) {
+  if (!files || files.length === 0) return;
+  pendingFiles = Array.from(files);
   document.getElementById("recognize-btn").disabled = false;
   setEditorStatus("");
 
-  const wrap = document.getElementById("preview-wrap");
-  const img = document.getElementById("preview-img");
-  document.getElementById("preview-name").textContent = file.name;
-
-  if (file.type.startsWith("image/")) {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      img.src = e.target.result;
-      img.classList.remove("hidden");
-    };
-    reader.readAsDataURL(file);
-  } else {
-    img.classList.add("hidden");
-    img.removeAttribute("src");
-  }
-  wrap.classList.remove("hidden");
+  const fileList = document.getElementById("file-list");
+  fileList.innerHTML = pendingFiles
+    .map(
+      (f, i) => `
+    <div class="flex items-center gap-2 text-sm text-slate-600">
+      <span class="text-slate-400">${i + 1}.</span>
+      <span class="flex-1">${escapeHtml(f.name)}</span>
+      <span class="text-xs text-slate-400">${(f.size / 1024).toFixed(1)} KB</span>
+    </div>
+  `
+    )
+    .join("");
+  fileList.classList.remove("hidden");
 }
 
-async function recognizeFile() {
-  if (!pendingFile) return;
-  setEditorStatus(t("editor.recognizing"));
+async function recognizeProblems() {
+  if (!pendingFiles.length) return;
+  const count = pendingFiles.length;
+
+  // 清空旧结果
+  batchResults = { successes: [], errors: [] };
+  document.getElementById("result-area").classList.add("hidden");
+
+  setEditorStatus(t("editor.recognizingBatch", { done: 0, total: count }));
   document.getElementById("recognize-btn").disabled = true;
+  document.getElementById("file-input").disabled = true;
 
-  const form = new FormData();
-  form.append("file", pendingFile);
+  const processed = { success: 0, failed: 0 };
 
-  try {
-    const res = await fetch(`${API_BASE}/api/upload`, {
-      method: "POST",
-      body: form,
+  // 并发上传（通过队列限流）
+  await Promise.all(
+    pendingFiles.map((file) =>
+      aiQueue.add(async () => {
+        const form = new FormData();
+        form.append("file", file);
+
+        try {
+          const res = await fetch(`${API_BASE}/api/upload`, {
+            method: "POST",
+            body: form,
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+
+          batchResults.successes.push({ data, file });
+          processed.success++;
+          setEditorStatus(
+            t("editor.recognizingBatch", {
+              done: processed.success + processed.failed,
+              total: count,
+            })
+          );
+        } catch (err) {
+          batchResults.errors.push({ file: file.name, error: err.message });
+          processed.failed++;
+          setEditorStatus(
+            t("editor.recognizingBatch", {
+              done: processed.success + processed.failed,
+              total: count,
+            })
+          );
+        }
+      })
+    )
+  );
+
+  // 显示结果
+  if (batchResults.successes.length > 0) {
+    showBatchResults();
+    setEditorStatus(
+      t("editor.batchComplete", {
+        success: processed.success,
+        failed: processed.failed,
+      })
+    );
+  } else {
+    setEditorStatus(t("editor.allFailed"), true);
+  }
+
+  document.getElementById("recognize-btn").disabled = false;
+  document.getElementById("file-input").disabled = false;
+  pendingFiles = [];
+  document.getElementById("file-list").classList.add("hidden");
+}
+
+// 结果区标签页样式（选中 / 未选中）
+const TAB_CLASS_BASE = "flex items-center gap-2 px-3 py-1.5 text-sm rounded-t border-b-2 transition-colors";
+const TAB_CLASS_ACTIVE = `${TAB_CLASS_BASE} border-blue-600 text-blue-600 bg-blue-50`;
+const TAB_CLASS_IDLE = `${TAB_CLASS_BASE} border-transparent text-slate-600 hover:bg-slate-50`;
+
+function showBatchResults() {
+  const resultArea = document.getElementById("result-area");
+  const tabsContainer = document.getElementById("result-tabs");
+  const panelsContainer = document.getElementById("result-panels");
+  const errorList = document.getElementById("error-list");
+  const errorItems = document.getElementById("error-items");
+  const template = document.getElementById("result-panel-template");
+
+  tabsContainer.innerHTML = "";
+  panelsContainer.innerHTML = "";
+  errorItems.innerHTML = "";
+
+  // 同一文件重复上传时后端按 hash 去重、返回同一条记录 → 只保留一个标签。
+  const seen = new Set();
+  batchResults.successes = batchResults.successes.filter(({ data }) => {
+    if (seen.has(data.id)) return false;
+    seen.add(data.id);
+    return true;
+  });
+
+  batchResults.successes.forEach(({ data }, idx) => {
+    const tabId = `tab-${data.id}`;
+
+    // 标签：<button> 里不能再嵌 <button>（浏览器会把内层拆出来），关闭用 <span>
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = idx === 0 ? TAB_CLASS_ACTIVE : TAB_CLASS_IDLE;
+    tab.dataset.tabId = tabId;
+    const label = document.createElement("span");
+    label.className = "font-medium";
+    label.textContent = `#${data.seq || data.id}`;
+    const close = document.createElement("span");
+    close.className = "tab-close text-slate-400 hover:text-red-500 leading-none";
+    close.textContent = "×";
+    close.title = t("editor.closeTab");
+    tab.append(label, close);
+    tabsContainer.appendChild(tab);
+
+    // 面板：从 <template> 克隆。模板内容不在文档树里，
+    // applyStaticTranslations() 扫不到，克隆后要自己翻译一遍。
+    const panel = template.content.cloneNode(true).querySelector(".result-panel");
+    panel.dataset.panelId = tabId;
+    panel.dataset.problemId = data.id;
+    if (idx !== 0) panel.classList.add("hidden");
+    panel.querySelectorAll("[data-i18n]").forEach((el) => {
+      el.textContent = t(el.dataset.i18n);
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-    showResult(data);
-    setEditorStatus(t("editor.recognized"));
-  } catch (err) {
-    setEditorStatus(err.message, true);
-  } finally {
-    document.getElementById("recognize-btn").disabled = false;
+    panel.querySelectorAll("[data-i18n-ph]").forEach((el) => {
+      el.placeholder = t(el.dataset.i18nPh);
+    });
+
+    panel.querySelector(".result-subject").textContent = subjectLabel(data.subject);
+    panel.querySelector(".result-id").textContent = `#${data.seq || data.id}`;
+    const render = panel.querySelector(".result-render");
+    render.textContent = data.latex_code || data.raw_text || t("editor.empty");
+    panel.querySelector(".latex-textarea").value = data.latex_code || "";
+
+    panel.querySelector(".correct-btn").onclick = () => submitCorrection(data.id, panel);
+    panel.querySelector(".update-latex-btn").onclick = () => updateLatex(data.id, panel);
+    panel.querySelector(".correct-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") submitCorrection(data.id, panel);
+    });
+
+    panelsContainer.appendChild(panel);
+    renderLatex(render);
+  });
+
+  // 失败列表
+  if (batchResults.errors.length > 0) {
+    errorItems.innerHTML = batchResults.errors
+      .map(
+        (e) =>
+          `<li><strong>${escapeHtml(e.file)}</strong>: ${escapeHtml(e.error)}</li>`
+      )
+      .join("");
+  }
+  errorList.classList.toggle("hidden", batchResults.errors.length === 0);
+
+  activeTabId = batchResults.successes.length
+    ? `tab-${batchResults.successes[0].data.id}`
+    : null;
+  resultArea.classList.remove("hidden");
+}
+
+function switchTab(tabId) {
+  document.querySelectorAll("#result-tabs button").forEach((btn) => {
+    btn.className = btn.dataset.tabId === tabId ? TAB_CLASS_ACTIVE : TAB_CLASS_IDLE;
+  });
+  document.querySelectorAll("#result-panels .result-panel").forEach((panel) => {
+    panel.classList.toggle("hidden", panel.dataset.panelId !== tabId);
+  });
+  activeTabId = tabId;
+}
+
+function closeTab(tabId) {
+  document.querySelector(`#result-tabs button[data-tab-id="${tabId}"]`)?.remove();
+  document.querySelector(`#result-panels .result-panel[data-panel-id="${tabId}"]`)?.remove();
+  batchResults.successes = batchResults.successes.filter(
+    ({ data }) => `tab-${data.id}` !== tabId
+  );
+
+  if (activeTabId !== tabId) return;
+  const remaining = document.querySelector("#result-tabs button");
+  if (remaining) {
+    switchTab(remaining.dataset.tabId);
+  } else {
+    // 标签全关了：收起结果区（失败列表也一并收起）
+    document.getElementById("result-area").classList.add("hidden");
+    activeTabId = null;
   }
 }
 
-async function submitCorrection() {
-  if (!currentProblem) return;
-  const input = document.getElementById("correct-input");
+// 结果区标签栏事件委托：点 × 关闭，点其它区域切换
+function onResultTabsClick(e) {
+  const tab = e.target.closest("button[data-tab-id]");
+  if (!tab) return;
+  if (e.target.closest(".tab-close")) closeTab(tab.dataset.tabId);
+  else switchTab(tab.dataset.tabId);
+}
+
+async function submitCorrection(problemId, panel) {
+  const input = panel.querySelector(".correct-input");
   const feedback = input.value.trim();
   if (!feedback) return;
 
@@ -1112,13 +1401,18 @@ async function submitCorrection() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        problem_id: currentProblem.id,
+        problem_id: problemId,
         user_feedback: feedback,
       }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-    showResult(data);
+
+    // 更新面板内容
+    const render = panel.querySelector(".result-render");
+    render.textContent = data.latex_code || data.raw_text || t("editor.empty");
+    renderLatex(render);
+    panel.querySelector(".latex-textarea").value = data.latex_code || "";
     input.value = "";
     setEditorStatus(t("editor.corrected"));
   } catch (err) {
@@ -1126,20 +1420,23 @@ async function submitCorrection() {
   }
 }
 
-async function updateLatex() {
-  if (!currentProblem) return;
-  const latex = document.getElementById("latex-textarea").value;
+async function updateLatex(problemId, panel) {
+  const latex = panel.querySelector(".latex-textarea").value;
 
   setEditorStatus(t("editor.saving"));
   try {
-    const res = await fetch(`${API_BASE}/api/problems/${currentProblem.id}`, {
+    const res = await fetch(`${API_BASE}/api/problems/${problemId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ latex_code: latex }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
-    showResult(data);
+
+    // 更新渲染
+    const render = panel.querySelector(".result-render");
+    render.textContent = data.latex_code || data.raw_text || t("editor.empty");
+    renderLatex(render);
     setEditorStatus(t("editor.updated"));
   } catch (err) {
     setEditorStatus(err.message, true);
@@ -1365,9 +1662,11 @@ function bindEditorEvents() {
   const fileInput = document.getElementById("file-input");
 
   dropzone.addEventListener("click", () => fileInput.click());
-  fileInput.addEventListener("change", (e) =>
-    handleFileSelected(e.target.files[0])
-  );
+  // 选完同一批文件再选一次不会触发 change，清空 value 保证每次都能重选
+  fileInput.addEventListener("change", (e) => {
+    handleFileSelected(e.target.files);
+    e.target.value = "";
+  });
 
   dropzone.addEventListener("dragover", (e) => {
     e.preventDefault();
@@ -1379,20 +1678,13 @@ function bindEditorEvents() {
   dropzone.addEventListener("drop", (e) => {
     e.preventDefault();
     dropzone.classList.remove("dragover");
-    if (e.dataTransfer.files.length) {
-      handleFileSelected(e.dataTransfer.files[0]);
-    }
+    if (e.dataTransfer.files.length) handleFileSelected(e.dataTransfer.files);
   });
 
-  document
-    .getElementById("recognize-btn")
-    .addEventListener("click", recognizeFile);
-  document
-    .getElementById("correct-btn")
-    .addEventListener("click", submitCorrection);
-  document
-    .getElementById("update-latex-btn")
-    .addEventListener("click", updateLatex);
+  document.getElementById("recognize-btn").addEventListener("click", recognizeProblems);
+  // 结果区每个面板的「提交修正 / 更新」按钮在 showBatchResults 里逐面板绑定；
+  // 标签栏的切换 / 关闭走事件委托。
+  document.getElementById("result-tabs").addEventListener("click", onResultTabsClick);
 }
 
 // 切换界面语言：刷新静态文本 + 重渲染当前视图的动态内容，
@@ -1561,7 +1853,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }, 300);
   });
 
-  // 导出 PDF
+  // 导出 PDF（Electron printToPDF，不依赖 XeLaTeX）
   document.getElementById("export-pdf-btn").addEventListener("click", exportPDF);
 
   bindEditorEvents();

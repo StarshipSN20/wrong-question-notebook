@@ -6,10 +6,13 @@
 
 import base64
 import hashlib
+import io
 import json
 import os
 import re
 import sys
+import tempfile
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import date
 from pathlib import Path
@@ -73,7 +76,10 @@ FORMAT_CONTRACT = (
     "严格遵守以下格式规则：\n"
     "1. 所有数学/物理/化学公式必须用 \\\\( \\\\) 包裹行内公式、用 \\\\[ \\\\] 包裹行间公式；"
     "禁止使用 $ … $、$$ … $$、\\\\begin{equation}、\\\\begin{align} 等任何其它公式定界符。\n"
-    "2. 内容里有多个部分（多道题、多个小问、多个解题步骤）时，每部分各占一段，"
+    "2. LaTeX 公式中的所有大括号必须成对匹配：每个 { 必须有对应的 }，"
+    "每个 \\\\frac{分子}{分母}、\\\\sqrt{内容}、\\\\sum_{下标}^{上标} 等命令的大括号都要完整闭合。"
+    "输出前务必检查括号配对。\n"
+    "3. 内容里有多个部分（多道题、多个小问、多个解题步骤）时，每部分各占一段，"
     "段与段之间用换行符 \\n 分隔，并保留原有编号（如 1.、2.、(a)、(i)）。\n"
     "3. 返回值是 JSON 字符串，LaTeX 里的反斜杠必须按 JSON 规则转义："
     "\\\\frac 要写成 \\\\\\\\frac，\\\\( 要写成 \\\\\\\\(。"
@@ -86,10 +92,22 @@ FORMAT_CONTRACT = (
 JSON_SPEC = (
     "JSON 字段如下：\n"
     '{"subject": "数学/物理/化学 之一", '
+    '"question_type": "MC/TF/SAQ/LAQ 之一", '
+    '"has_diagram": true 或 false, '
     '"latex_code": "题目内容（遵守上述格式规则）", '
     '"raw_text": "题目的纯文本形式", '
     '"tags": ["知识点标签1", "知识点标签2", "知识点标签3"], '
     '"answer_latex": "题目的解答/答案（遵守上述格式规则；若原图或原文中没有解答，则输出空字符串 \\"\\"）"}'
+    "\n"
+    "question_type 识别规则：\n"
+    "- MC（选择题）：题目中有明确的选项标记（A/B/C/D 或 ①②③④ 或 a/b/c/d）且要求选择答案\n"
+    "- TF（判断题）：要求判断对错、真假、正误、是非\n"
+    "- SAQ（简答题）：需要简短回答、计算结果、填空、简单证明，通常 2-5 行可答完\n"
+    "- LAQ（解答题）：需要完整推导、详细证明、深入分析，通常 5 行以上\n"
+    "\n"
+    "has_diagram 判断规则：\n"
+    "题目中是否包含必不可少的图示（如几何图形、物理装置图、电路图、化学结构式、函数图像、示意图等）。\n"
+    "不包括纯文字说明或简单的数学公式。若含图示，在 latex_code 对应位置标注【此处有图】。\n"
     "\n"
     "tags 字段是必填项，不得为空数组：必须为每道题给出 2-4 个具体的知识点标签"
     "（例如「二次函数」「数列递推」「牛顿第二定律」「氧化还原反应」这种细分知识点，"
@@ -222,6 +240,7 @@ def _row_to_problem(row) -> ProblemOut:
 
     question_latex / answer_latex：优先用库里的 answer_latex 列；
     为空时尝试从 latex_code 按【题目】/【解答】标记拆分（兼容旧数据）。
+    所有列都由 database.init_db() 的幂等迁移保证存在，这里不再逐列判空。
     """
     raw_tags = row["tags"]
     try:
@@ -230,10 +249,9 @@ def _row_to_problem(row) -> ProblemOut:
         tags = []
     question, split_answer = _split_q_a(row["latex_code"] or row["raw_text"] or "")
     answer = row["answer_latex"] or split_answer
-    keys = row.keys()
     return ProblemOut(
         id=row["id"],
-        seq=row["seq"] if "seq" in keys else 0,
+        seq=row["seq"] if "seq" in row.keys() else 0,
         image_path=row["image_path"],
         raw_text=row["raw_text"],
         latex_code=row["latex_code"],
@@ -248,6 +266,9 @@ def _row_to_problem(row) -> ProblemOut:
         is_generated=bool(row["is_generated"]),
         parent_id=row["parent_id"],
         last_review_date=row["last_review_date"],
+        question_type=row["question_type"],
+        has_diagram=bool(row["has_diagram"]),
+        diagram_path=row["diagram_path"],
     )
 
 
@@ -306,6 +327,9 @@ def _insert_problem(
     is_generated: bool = False,
     parent_id: Optional[int] = None,
     answer_latex: Optional[str] = None,
+    question_type: Optional[str] = None,
+    has_diagram: bool = False,
+    diagram_path: Optional[str] = None,
 ) -> ProblemOut:
     """插入一条错题：created_at 为当天，next_review_date 按艾宾浩斯首个间隔计算。
 
@@ -329,8 +353,8 @@ def _insert_problem(
             INSERT INTO problems
                 (image_path, raw_text, latex_code, subject, tags,
                  created_at, next_review_date, review_stage, raw_image_hash,
-                 is_generated, parent_id, answer_latex)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 is_generated, parent_id, answer_latex, question_type, has_diagram, diagram_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 image_path,
@@ -345,6 +369,9 @@ def _insert_problem(
                 1 if is_generated else 0,
                 parent_id,
                 answer_latex,
+                question_type,
+                1 if has_diagram else 0,
+                diagram_path,
             ),
         )
         conn.commit()
@@ -613,6 +640,13 @@ async def upload_problem(file: UploadFile = File(...)) -> ProblemOut:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     parsed = _parse_ai_json(ai_text)
+    has_diagram = bool(parsed.get("has_diagram", False))
+
+    # 若识别出图示且是图片文件，把原图路径同时存到 diagram_path
+    diagram_path = None
+    if has_diagram and ext in IMAGE_MIME:
+        diagram_path = str(saved_path)
+
     return _insert_problem(
         image_path=str(saved_path),
         raw_text=parsed.get("raw_text"),
@@ -621,6 +655,9 @@ async def upload_problem(file: UploadFile = File(...)) -> ProblemOut:
         tags=parsed.get("tags") or [],
         raw_image_hash=file_hash,
         answer_latex=_sanitize_latex(parsed.get("answer_latex") or "") or None,
+        question_type=parsed.get("question_type"),
+        has_diagram=has_diagram,
+        diagram_path=diagram_path,
     )
 
 
@@ -725,8 +762,20 @@ async def generate_answer(req: GenerateAnswerRequest) -> ProblemOut:
         + (f"\n{context}\n" if context else "")
     )
 
+    # 若题目有图示且原始图片存在，附带图片供 AI 参考（视觉模型能看到图形细节）。
+    image_b64 = None
+    image_mime = None
+    if row["has_diagram"] and row["image_path"]:
+        img_path = Path(row["image_path"])
+        if img_path.exists():
+            ext = img_path.suffix.lower()
+            if ext in IMAGE_MIME:
+                with open(img_path, "rb") as f:
+                    image_b64 = base64.b64encode(f.read()).decode("ascii")
+                    image_mime = IMAGE_MIME[ext]
+
     try:
-        ai_text = await ai_client.call_ai(prompt)
+        ai_text = await ai_client.call_ai(prompt, image_base64=image_b64, image_mime=image_mime)
     except ai_client.AIConfigError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ai_client.AIRequestError as exc:
@@ -878,7 +927,12 @@ def complete_review(problem_id: int) -> ProblemOut:
 # ---------------------------------------------------------------------------
 @app.post("/api/export")
 def export_latex(req: ExportRequest) -> Response:
-    """按勾选的 problem_ids 生成 .tex 文件流供前端下载。"""
+    """按勾选的 problem_ids 生成 .tex 供前端下载。
+
+    image_problem_ids 里的题目会把原图一并带上：此时返回 .zip（mistakes.tex + images/），
+    否则返回单个 .tex。PDF 导出不走这里——前端用 Electron printToPDF 直接出 PDF，
+    不依赖本机 TeX 发行版。
+    """
     if not req.problem_ids:
         raise HTTPException(status_code=400, detail="未选择任何错题")
 
@@ -886,7 +940,7 @@ def export_latex(req: ExportRequest) -> Response:
     conn = database.get_connection()
     try:
         rows = conn.execute(
-            f"SELECT * FROM problems WHERE id IN ({placeholders})",
+            f"SELECT {SELECT_COLS} FROM problems p WHERE p.id IN ({placeholders})",
             tuple(req.problem_ids),
         ).fetchall()
     finally:
@@ -894,31 +948,62 @@ def export_latex(req: ExportRequest) -> Response:
     if not rows:
         raise HTTPException(status_code=404, detail="所选错题不存在")
 
-    # 按用户勾选顺序排列，拆分题目/答案。
+    # 按前端勾选顺序排列（SQL IN 不保序）
     by_id = {row["id"]: row for row in rows}
-    ordered = [by_id[i] for i in req.problem_ids if i in by_id]
+    image_ids = set(req.image_problem_ids)
     problems = []
-    for r in ordered:
+    for r in (by_id[i] for i in req.problem_ids if i in by_id):
         question, split_answer = _split_q_a(r["latex_code"] or r["raw_text"] or "")
+        img_path = r["image_path"]
+        # 只嵌图片文件；PDF/DOCX 上传的原件没法 \includegraphics
+        with_image = (
+            r["id"] in image_ids
+            and bool(img_path)
+            and Path(img_path).suffix.lower() in IMAGE_MIME
+            and Path(img_path).exists()
+        )
         problems.append(
             {
                 "subject": r["subject"],
                 "question_latex": question or None,
                 "answer_latex": r["answer_latex"] or split_answer,
                 "raw_text": r["raw_text"],
+                "question_type": r["question_type"],
+                "image_path": img_path if with_image else None,
             }
         )
 
-    tex = exporter.build_tex(
-        problems,
-        include_answers=req.include_answers,
-        answers_last=req.answers_last,
-        language=req.language,
-    )
+    if not any(p["image_path"] for p in problems):
+        tex = exporter.build_tex(
+            problems,
+            include_answers=req.include_answers,
+            answers_last=req.answers_last,
+            language=req.language,
+        )
+        return Response(
+            content=tex.encode("utf-8"),
+            media_type="application/x-tex",
+            headers={"Content-Disposition": "attachment; filename=mistakes.tex"},
+        )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        export_dir = Path(tmpdir)
+        tex = exporter.build_tex_with_images(
+            problems,
+            export_dir,
+            include_answers=req.include_answers,
+            answers_last=req.answers_last,
+            language=req.language,
+        )
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("mistakes.tex", tex)
+            for img in sorted((export_dir / "images").iterdir()):
+                zf.write(img, f"images/{img.name}")
     return Response(
-        content=tex,
-        media_type="application/x-tex",
-        headers={"Content-Disposition": "attachment; filename=mistakes.tex"},
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=mistakes.zip"},
     )
 
 

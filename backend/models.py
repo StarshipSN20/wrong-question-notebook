@@ -44,6 +44,9 @@ class ProblemOut(BaseModel):
     is_generated: bool = False
     parent_id: Optional[int] = None
     last_review_date: Optional[str] = None
+    question_type: Optional[str] = None
+    has_diagram: bool = False
+    diagram_path: Optional[str] = None
 
 
 class ProblemUpdate(BaseModel):
@@ -97,14 +100,16 @@ class GenerateAnswerRequest(BaseModel):
 
 
 class ExportRequest(BaseModel):
-    """批量导出的入参。
+    """批量导出 .tex 的入参。
 
     include_answers：是否包含答案；answers_last：答案集中放到文档最后
     （两者都含答案时：false=答案紧跟每题，true=答案放在最后）。
+    image_problem_ids：要嵌入原图的题目 id 列表；非空时返回 .zip（.tex + images/），
+    否则返回单个 .tex。PDF 由前端 Electron 打印生成，不经过后端。
     """
 
     problem_ids: List[int]
     include_answers: bool = True
     answers_last: bool = False
-    # 卷头用词语言（zh/en），跟随界面语言，避免英文界面导出中文卷头
     language: str = "zh"
+    image_problem_ids: List[int] = Field(default_factory=list)

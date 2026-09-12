@@ -1,222 +1,318 @@
 # CLAUDE.md
 
 给新会话的速查手册。功能说明见 `README.md`，打包步骤见 `BUILD.md`；
-这里只记**不看代码就会踩的坑**。
+这里记**架构概览**和**不看代码就会踩的坑**。
+
+---
+
+## 项目结构速览
+
+```
+wrong-question-notebook/
+├── main.js              Electron 主进程：拉起后端子进程、contextBridge、printToPDF
+├── preload.js           contextBridge 暴露 window.pdfApi.exportPdf
+├── src/
+│   ├── index.html       全部界面（单页，静态文本带 data-i18n）
+│   ├── render.js        全部前端逻辑（约 1700 行，单文件，CommonJS-free 普通脚本）
+│   ├── i18n.js          中英词典（~165 键）+ t() / setLanguage() / subjectLabel()
+│   └── vendor/katex/    本地 KaTeX（离线可用）；Tailwind 走 CDN
+├── backend/
+│   ├── main.py          FastAPI 全部路由 + 提示词（FORMAT_CONTRACT / JSON_SPEC 等）
+│   ├── models.py        Pydantic 模型（ProblemOut / ExportRequest 等）
+│   ├── database.py      SQLite 连接、建表、迁移（ALTER TABLE 幂等式）
+│   ├── config.py        config.json 读写（api_key / base_url / model_name 等）
+│   └── services/
+│       ├── ai_client.py OpenAI 兼容调用（纯文本 + multimodal vision）
+│       ├── effort.py    推理档位探测与降级（none→max 七档）
+│       ├── exporter.py  LaTeX/PDF 导出（build_tex / build_tex_with_images）
+│       ├── scheduler.py 艾宾浩斯复习计划（1/2/4/7/15 天）
+│       └── textfix.py   AI 文本收敛（JSON 修复、定界符统一，纯函数）
+└── scripts/
+    └── afterPack.js     electron-builder 钩子：macOS ad-hoc 签名
+```
+
+---
+
+## 数据库 Schema（`notebook.db`）
+
+```sql
+problems (
+  id              INTEGER PRIMARY KEY,
+  image_path      TEXT,          -- 上传图片的本地绝对路径（uploads/ 下）
+  raw_text        TEXT,          -- AI 识别的纯文本
+  latex_code      TEXT,          -- AI 产出的 LaTeX（题目+答案混在一起的旧格式 OR 题目部分）
+  subject         TEXT,          -- 数学/物理/化学（永远中文枚举）
+  tags            TEXT,          -- JSON 数组字符串，如 ["二次函数","导数"]
+  created_at      TEXT,
+  next_review_date TEXT,
+  review_stage    INTEGER DEFAULT 0,
+  raw_image_hash  TEXT,          -- SHA-256，去重用
+  is_generated    INTEGER DEFAULT 0,   -- 举一反三生成的题
+  parent_id       INTEGER,             -- 来源题 id
+  last_review_date TEXT,
+  answer_latex    TEXT,          -- 独立的答案字段（与 latex_code 分离）
+  question_type   TEXT DEFAULT 'SAQ',  -- MC / TF / SAQ / LAQ
+  has_diagram     INTEGER DEFAULT 0,   -- AI 检测到图示为 1
+  diagram_path    TEXT           -- 图示图片路径（通常等于 image_path）
+)
+```
+
+**`seq` 不在库里**，是查询时 `ROW_NUMBER() OVER (ORDER BY id)` 算出的连续序号，
+删题不留空号。前端显示用 `seq`，接口调用用真实主键 `id`，混用会操作错题。
+
+数据目录：`%APPDATA%\wrong-question-notebook\`（由 `main.js` 通过 `app.setPath`
+传入 `USER_DATA` 环境变量；后端 `database.get_data_dir()` 读该变量，
+未设置时退回 `backend/data/`）。
+
+---
+
+## API 路由一览（`backend/main.py`）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/health` | 健康检查 |
+| GET | `/api/problems` | 列出全部错题（含 seq） |
+| GET | `/api/problems/{id}` | 单题详情 |
+| POST | `/api/problems` | 手动新增 |
+| PATCH | `/api/problems/{id}` | 更新字段（subject/tags/latex_code/answer_latex） |
+| DELETE | `/api/problems/{id}` | 删除 |
+| POST | `/api/upload` | 上传图片/PDF/DOCX → AI 识别 → 存库，返回 ProblemOut |
+| POST | `/api/correct-latex` | 自然语言修正题目 LaTeX |
+| POST | `/api/generate-answer` | AI 生成/重生成/修正答案 |
+| POST | `/api/generate-similar` | 举一反三（变式/拓展） |
+| GET | `/api/review/due` | 今日待复习列表 |
+| POST | `/api/review/{id}/complete` | 标记复习完成（推进阶段） |
+| GET | `/api/config` | 读配置（注意：api_key 明文，别打印到终端） |
+| POST | `/api/config` | 写配置 |
+| GET | `/api/effort/levels` | 当前模型支持的推理档位列表 |
+| POST | `/api/effort/probe` | 逐档探测，写入缓存 |
+| POST | `/api/export` | 导出 .tex/.zip（见下；PDF 不走后端） |
+
+### `/api/export` 入参（`ExportRequest`）
+
+```python
+problem_ids: List[int]           # 要导出的题目 id，按此顺序排列
+include_answers: bool = True
+answers_last: bool = False       # True = 答案集中放末页
+language: str = "zh"             # 卷头语言
+image_problem_ids: List[int] = []  # 要嵌入原图的题目 id（前端每题有「含图」checkbox）
+```
+
+- `image_problem_ids` 为空 → 不嵌入任何图，返回 `.tex`
+- `image_problem_ids` 非空 → 返回 `.zip`（`mistakes.tex` + `images/problem_{序号}.{ext}`）
+- 图片文件不存在或后缀不是图片格式时静默跳过，不会 500
+- 三种版本（含答案 / 不含答案 / 答案末页）每题之后都有 `\vspace{0.8cm}` 间距；
+  不含答案版本额外按题型留作答空白（`exporter.answer_space_cm`）
+
+**后端不编译 PDF**（用户没有 XeLaTeX）。PDF 一律由前端 `exportPDF()` 生成：
+`buildPdfHtml` 拼 HTML → `window.pdfApi.exportPdf` → `main.js` 隐藏窗口 `loadFile`
+→ `printToPDF`。原图通过 `file://` URL 嵌入（`toFileUrl()`），所以打印页必须是
+`file://` 页面而不是 data URL。
+
+**作答空白规则前后端各有一份**（`exporter.answer_space_cm` ↔ `render.js`
+`answerSpaceCm`），改一处要同步另一处：MC/TF 无；SAQ 3cm + min(行数×0.5, 3)；
+LAQ/未知 6cm + min(行数×0.8, 6)，行数 = 字数/80。
+
+回归测试：`backend/venv/Scripts/python.exe tests/test_export_backend.py`
+（起临时 `USER_DATA` 的 uvicorn，端口 8765，不碰真实库）。
+
+---
+
+## 前端架构（`src/render.js`）
+
+单文件，无构建工具，普通 `<script src="render.js">`（非 module，避免 Electron 的 ES
+module 限制）。
+
+**关键全局状态：**
+- `problemsCache`：`Map<id, ProblemOut>`，所有已加载题目的本地缓存
+- `detailProblem`：当前详情弹窗显示的题目
+- `currentView`：当前视图名（notebook / similar / review / export）
+
+**并发上传：**`RequestQueue`（内联在文件顶部，类实现；**不要**再建独立的
+`requestQueue.js`，非 module 脚本 import 不了它）控制最大并发 3、间隔 200ms，
+批量上传多张图片时以标签页方式展示各题结果。
+
+**结果标签页（`showBatchResults`）：**
+- 按 `data.id` 去重——同一文件传两次，后端按哈希去重返回同一条记录，否则出现两个
+  `tab-<id>`。
+- 关闭按钮是 `<span class="tab-close">`，靠 `#result-tabs` 上的事件委托处理；
+  别改回 `<button>` 套 `<button>`，那是非法 HTML，浏览器会拆开。
+- 面板来自 `<template>`，**`applyStaticTranslations()` 扫不到 template 内容**，
+  克隆后要手动翻译 `[data-i18n]` / `[data-i18n-ph]`。
+- 文件 `<input>` 的 `change` 处理完要 `e.target.value = ""`，否则重选同一批文件不触发。
+
+**图片显示：**只要 `problem.diagram_path || problem.image_path` 存在就在卡片和
+详情弹窗显示（统一走 `problemImagePath()`），不依赖 `has_diagram` 标志
+（`has_diagram` 只影响 AI 生成答案时是否附图）。
+
+**导出列表：**每道有图的题目显示「含图」checkbox（`export-img-cb`），勾选状态决定
+`image_problem_ids`（LaTeX）和 PDF 中嵌图的题目集合。**动态生成的 HTML 不要带
+`data-i18n`**，直接写 `t()` 结果，否则切语言时会被 `applyStaticTranslations()` 覆盖。
+
+---
+
+## AI 调用约定（必须遵守）
+
+所有 AI 调用点（识图/文本整理/修正题目/生成答案/举一反三）共用：
+
+```
+FORMAT_CONTRACT  （格式规则：定界符、大括号配对、JSON 转义）
++ 字段说明：
+  JSON_SPEC      录入类（识图/文本整理）→ subject/question_type/has_diagram/latex_code/raw_text/tags/answer_latex
+  ANSWER_SPEC    生成答案               → answer_latex
+  QUESTION_SPEC  修正题目               → latex_code
+```
+
+**所有调用都要求返回 JSON，所有返回都用 `textfix.parse_ai_json` 解析。**
+不要拆成「有的要 JSON、有的要纯文本」——拆过一次，答案被原样存成 `{"latex_code":"..."}` 进库。
+
+`has_diagram=true` 的题目在 `/api/generate-answer` 时会附带原图（base64）给 AI，
+让视觉模型看到图形细节再解题。
+
+---
 
 ## 上手
 
 git 根目录是 `E:\MistakeNotebook\wrong-question-notebook`（**不是**上层的
-`E:\MistakeNotebook`）。`npm start` 必须在这个子目录里跑，否则报 ENOENT。
+`E:\MistakeNotebook`）。`npm start` 必须在这个子目录里跑。
 
 ```
-main.js          Electron 主进程：拉起后端、系统通知、PDF 打印（printToPDF）
-preload.js       contextBridge 暴露 window.pdfApi.exportPdf
-src/index.html   全部界面，静态文本带 data-i18n 标记
-src/render.js    全部前端逻辑（约 1550 行，单文件）
-src/i18n.js      中英词典（158 键）+ t() / setLanguage() / subjectLabel()
-src/vendor/katex 本地 KaTeX（离线可用）；Tailwind 仍走 CDN
-backend/main.py  FastAPI 全部路由 + 提示词
-backend/services scheduler(艾宾浩斯) / exporter(.tex) / ai_client(OpenAI 兼容)
-                 effort(推理档位探测与降级) / textfix(AI 文本收敛，纯函数)
+main.js → spawn backend/venv/Scripts/python.exe backend/main.py
+       → loadFile src/index.html
+       → USER_DATA = app.getPath('userData')
+         = C:\Users\<user>\AppData\Roaming\wrong-question-notebook\
 ```
+
+---
 
 ## 动手前先做这件事
 
-**端口 8000 上的残留后端会让你的测试静默测错东西。** 上个会话吃过一次：
-临时 `USER_DATA` 起的后端没绑上端口，请求全打到旧实例，结果测试用例被写进了
-用户真实数据库。开测前先清：
+**端口 8000 上的残留后端会让你静默测错东西。** 开测前先清：
 
 ```bash
 netstat -ano | grep '127.0.0.1:8000' | grep LISTENING | awk '{print $NF}' \
   | sort -u | while read PID; do taskkill //F //PID $PID; done
 ```
 
-清完还不够，**要做归属证明**：起完后端往 `/api/problems` 写一条记录，
+清完还不够——**要做归属证明**：起完后端往 `/api/problems` 写一条记录，
 确认它落在你的临时 `USER_DATA` 库里再开测。只 curl `/health` 证明不了端口是谁的。
 
-另外：**bash 里用 `&` 起的后端在本环境活不到测试结束**（试过两次，日志空、
-端口没人听、写入不知去向）。用 Python `subprocess.Popen` 管生命周期才稳，
-界面测试也照这个路子起 Electron（见验证套路）。
+---
 
 ## 数据与隐私
 
-- 用户数据在 `%APPDATA%\wrong-question-notebook\`（db / uploads / config.json）。
-  这个目录名由 `main.js:24` 的 `app.setPath` **钉死**，不随 `productName` 变，
-  所以改应用名不会让老用户丢数据——别把它改回默认行为。
-- `config.json` 里 **api_key 是明文**。不要 `curl /api/config` 后把响应打到终端
-  （干过一次，泄进了会话记录）。要看就只取需要的字段。
-- 用户明确说"删测试数据"时，**包括 api_key**。别替他保留。
+- `config.json` 里 **api_key 是明文**。不要 `curl /api/config` 后把响应打到终端。
+- 用户数据在 `%APPDATA%\wrong-question-notebook\`，目录名由 `main.js:24`
+  的 `app.setPath` 钉死，改 `productName` 不会让老用户丢数据。
+
+---
 
 ## 容易搞错的约定
 
-- **`seq` 用于显示，`id` 用于接口**。`seq` 是 SQL 子查询算的连续序号（删题不留
-  空号），`data-id` / URL 里必须是真实主键 `id`。混用会删错题。
-- **学科在库里永远是中文枚举**（数学/物理/化学）。`_normalize_subject()` 会把模型
-  返回的 `Mathematics` 转回中文；界面靠 `subjectLabel()` 翻译显示。别把英文写进库，
-  否则色块失效、自动标签中英分裂、按标签搜索被割裂。
-- **`data-type="变式"/"拓展"` 是发给后端的协议值**，不要 i18n 化；按钮上的文字才翻译。
-- **所有 AI 调用点共用一份格式契约**：`FORMAT_CONTRACT`（格式规则）+ 一个字段说明
-  （`JSON_SPEC` 录入类 / `ANSWER_SPEC` 生成答案 / `QUESTION_SPEC` 修正题目），
-  全部要求返回 JSON，全部用 `textfix.parse_ai_json` 解析。
-  **不要再拆成「有的要 JSON、有的要纯文本」**——拆过一次，代价见下面两节。
-  前端只有一套渲染（KaTeX 扫 `\( \)` `\[ \]`），所以格式必须只有一套。
-- `reasoning_effort` 被上游拒绝时，`ai_client` 会**去掉该参数自动重试一次**——
-  看到这段重试逻辑别当成 bug 删掉，它是兼容非推理模型的关键。
-  现在还会顺手 `effort.record_rejection()` 记下来，下次直接降档不再白跑。
+- **`seq` 显示，`id` 接口**。混用会删错题。
+- **学科在库里永远是中文枚举**（数学/物理/化学）。`_normalize_subject()` 把模型返
+  回的 `Mathematics` 转回中文；界面靠 `subjectLabel()` 翻译显示。
+- **`data-type="变式"/"拓展"` 是协议值，不要 i18n 化**。
+- **`sqlite3.Row` 没有 `.get()` 方法**，用 `row["field"] if "field" in row.keys() else default`。
+- **`reasoning_effort` 被上游拒绝时 `ai_client` 自动重试一次**（去掉参数），
+  看到这段重试逻辑别当 bug 删掉，它是兼容非推理模型的关键。
 
-## 推理档位不是写死的枚举
-
-`services/effort.py` 是唯一的档位真相来源：阶梯 `none/minimal/low/medium/high/xhigh/max`
-（`auto` = 不发送该参数，不在阶梯里）。可用档位按三层优先级取：
-
-```
-probe（真机逐档试探，最准）> learned（调用中被拒学到的）> catalog（模型名匹配表）> default（全给出）
-```
-
-**别把 catalog 当真理。** 它就是错的：本机实测 `gpt-5.6-luna`（经 api.apikey.fun 网关）
-七档全收，而 catalog 的 `^gpt-5` 规则只写到 high。用户的 base_url 多半是中转网关，
-能用哪些档由网关决定、跟模型名对不上；各家文档本身也不准（Gemini 3 Preview 拒 medium、
-Gemini 3 Flash 不认文档里写着的 minimal）。所以 `/api/effort/probe` 的结果覆盖一切。
-
-- 缓存在 `{userData}/effort_cache.json`，键是 `base_url::model`——换网关不串号。
-- `describe()` 返回的 `source=default` 表示**毫无信息**，此时 `_resolve_effort()`
-  必须传 `supported=None` 原样发送。传空列表会被当成「已知完全不支持」而静默不发参数。
-- 探测**必须先发一次不带该参数的基线请求**。基线失败（key/模型名错）就直接报错，
-  否则「全都失败」会被误判成「一档都不支持」。
-- 一次全 inconclusive 的探测不覆盖已有缓存，免得一次网络抖动清空之前的结果。
-- 下拉框里不支持的档位**只标注不隐藏**（探测可能偏保守，用户仍应能手选）；
-  真发请求时 `resolve()` 会降到最近的可用档位（选 max 而模型只到 high → 发 high）。
-- **超时必须随档位放宽**，见 `_EFFORT_TIMEOUTS`。原来固定 120 秒，加了 xhigh/max
-  之后必然超时：实测 gpt-5.6-luna 在 max 档解一道 1561 字的多问题目，三次调用
-  全部卡满 120 秒返回 502。现在 max 给 900 秒，且超时有独立报错文案
-  （否则会被「无法连接 AI 接口」吞掉，让人以为是网络问题）。
+---
 
 ## LaTeX 装在 JSON 里的两类坑（都修过，别退回去）
 
-模型返回的 JSON 里塞满 LaTeX 反斜杠，于是有两种坏法，**症状完全不同**：
+**坑 A：解析失败。** `\(` 不是合法 JSON 转义 → `json.loads` 报错。
+→ `textfix.repair_json_escapes()` 先补转义再解析。
 
-**坑 A：解析直接失败。** `\(` 不是合法 JSON 转义，模型写
-`"latex_code": "\(x\)"` 时 `json.loads` 报 `Invalid \escape`。真实事故：一条
-2623 字的答案在 char 878 处炸掉，解析失败后**整坨 JSON 被当正文存进库**，
-界面上显示 `{"latex_code":...}`。
-→ `textfix.repair_json_escapes()` 先把落单的反斜杠补成 `\\` 再解析。
-注意它必须先整对吃掉已经正确的 `\\`，否则会翻倍成四个。
+**坑 B：静默内容损坏（更阴）。** `\f` `\b` `\v` **是**合法 JSON 转义，
+`"\frac{1}{2}"` 解析不报错，但变成换页符 + `rac{1}{2}`。
+→ `textfix.undo_control_damage()` 在 `json.loads` 之后还原。
+受害命令：`\frac`→换页、`\beta`→退格、`\nabla`→换行、`\theta`→制表、`\rho`→回车。
 
-**坑 B：解析成功但内容静默错掉（更阴）。** `\f` `\b` `\v` **是**合法 JSON 转义，
-所以 `"\frac{1}{2}"` 解析不报错，只是变成换页符 + `rac{1}{2}`——公式错了但没人报警。
-受害的都是高频命令：`\frac`→换页、`\beta`→退格、`\nabla`→换行、`\theta`→制表、`\rho`→回车。
-→ `textfix.undo_control_damage()` 在 `json.loads` **之后**还原：
-- 换页/退格/垂直制表符在正文里永远不合理出现，**无条件**还原；
-- `\n` `\t` `\r` 是正文里的真换行/制表，**只在后面紧跟已知命令尾巴时**才还原
-  （`\n`+`abla`→`\nabla`）。宁可漏修也不能把 `"step1\nstep2"` 的真换行改坏——
-  有测试专门盯这条。
+---
 
-正常解析路径与截断兜底路径**都要**调 `undo_control_damage`，漏一条就有洞。
+## 推理档位不是写死的枚举
 
-老数据由 `database._repair_answer_blobs()` 一次性修好：只挑
-`TRIM(answer_latex) LIKE '{%'` 的行，修完不再以 `{` 开头，因此天然幂等。
-两类坏法它都能修。
+`services/effort.py` 是唯一真相来源：阶梯 `none/minimal/low/medium/high/xhigh/max`。
+优先级：`probe（真机探测）> learned（调用中被拒）> catalog（名称匹配表）> default`。
 
-## `\[\[` 会让整段公式渲染失败
+**别把 catalog 当真理**，它就是错的——用户的 base_url 多半是中转网关，能用哪些档
+由网关决定。`/api/effort/probe` 的结果覆盖一切。
 
-`sanitize_latex()` 给 `\begin{aligned}` 补 `\[` 时，若原文已经有 `\[` 就叠成 `\[\[`，
-KaTeX 直接报错。模型自己也会写两遍（真实数据里见过 `"\\[\n\\[\\begin{aligned}"`）。
-所以最后有一步「合并重复行间定界符」，循环到稳定。嵌套行间公式在 LaTeX 里本就不合法，
-无条件合并是安全的；但**别顺手把 `\\` 也合并了**，那是矩阵/换行用的。
+- 缓存在 `{userData}/effort_cache.json`，键是 `base_url::model`。
+- 超时必须随档位放宽（见 `_EFFORT_TIMEOUTS`）；max 档给 900 秒。
+
+---
 
 ## 两个反复咬人的技术坑
 
-**1. `buildPdfHtml` 是模板字符串，反斜杠要写四层。**
-打印页的 KaTeX 定界符必须写成 `\\\\[`：模板输出后是 `\\[`，页面 JS 解析后才是 `\[`。
-写两层会退化成普通括号 `(`，auto-render 把 `(x^2)` 当公式，整页公式渲染失败。
-这个 bug 修了三次才找对——因为测试文件里写的是四层，测试通过而实际代码是坏的。
+**1. `buildPdfHtml` 模板字符串反斜杠要写四层。**
+KaTeX 定界符必须写成 `\\\\[`：模板输出 `\\[`，页面 JS 解析后才是 `\[`。
 
-**2. 打印页必须 `loadFile` 临时 HTML，不能用 data URL。** 它要引用本地
-`vendor/katex`，data URL 页面加载不了 file:// 子资源。
+**2. 打印页必须 `loadFile` 临时 HTML，不能用 data URL。**
+它要引用本地 `vendor/katex`，data URL 页面加载不了 file:// 子资源。
 
-**2.5 `styles.css` 里想压过 Tailwind，必须写「元素名 + 类名」。** Tailwind Play CDN
-是运行时把 `<style>` 插到 `<head>` 末尾的，排在 `styles.css` 之后；同为单类选择器时
-它的 `.px-3` 会赢。`.choice-box { padding-right: 2.1rem }` 就这么被静默吃掉过
-（量出来还是 12px），改成 `input.choice-box, select.choice-box` 才生效。
-**验证要量 `getComputedStyle`，别看源码想当然。**
+**3. `styles.css` 覆盖 Tailwind 必须写「元素名 + 类名」。**
+Tailwind Play CDN 把 `<style>` 插到 `<head>` 末尾，排在 `styles.css` 之后，
+同为单类选择器时 Tailwind 的 `.px-3` 会赢。
 
-**2.6 选择框的 ⌄ 是自绘的，点击行为在 JS 里。** 为了让「模型名」输入框和下拉框长得
-一样，`.choice-box` 用 `appearance: none` + 背景 SVG 画箭头，并把 input[list] 的
-原生 `::-webkit-calendar-picker-indicator` **`display:none`**（各版本 Chromium
-绘制时机不一致，留着会在 hover 时冒出第二个箭头并排）。代价是自绘箭头不可点，
-故 `render.js` 里给模型名输入框挂了 click：`offsetX` 落在右侧 34px 内就调
-`showPicker()`。改 `padding-right` 时记得同步那个 34。
-另外 `getComputedStyle(el, "::-webkit-calendar-picker-indicator")` **返回的是宿主
-元素的值**（量出 width=454px 就是 input 自己），别拿它判断伪元素样式有没有生效。
+**4. 选择框的 ⌄ 是自绘的，`appearance: none` + 背景 SVG，
+原生 `::-webkit-calendar-picker-indicator` 已 `display:none`。**
+改 `padding-right` 时同步 `render.js` 里的 34px 点击阈值。
 
-**3. PyInstaller + conda：`sqlite3.dll` 走 `datas` 不走 `binaries`。**
-放 binaries 会被 PyInstaller 的 hook 去重掉，包里其实没有。`backend.spec` 里有注释。
-验证方式是列包内容，别信 spec 自己的打印：
+---
+
+## `\[\[` 会让整段公式渲染失败
+
+`sanitize_latex()` 给 `\begin{aligned}` 补 `\[` 时若原文已有 `\[` 就叠成 `\[\[`，
+KaTeX 直接报错。最后有一步「合并重复行间定界符」，循环到稳定。
+**别顺手把 `\\` 也合并了**，那是矩阵/换行用的。
+
+---
+
+## macOS「已损坏」≠ Gatekeeper 拦截
+
+| 提示 | 原因 | 隐私设置能否放行 |
+|------|------|------------------|
+| 来自身份不明的开发者 | 有签名但非 Apple 认证 | 能 |
+| **已损坏，无法打开** | **完全没有签名** | **不能** |
+
+Apple Silicon 上内核直接拒绝无签名 arm64 二进制。
+→ `scripts/afterPack.js` 实现 ad-hoc 签名（`codesign --sign -`）。
+**签名顺序必须从内到外**：先签 PyInstaller 产物，最后签 `.app` 外壳。
+
+---
+
+## PyInstaller + conda
+
+`sqlite3.dll` 必须走 `datas` 不走 `binaries`（放 binaries 会被 hook 去重掉）。
+见 `backend.spec` 注释。验证：
 
 ```bash
 python -m PyInstaller.utils.cliutils.archive_viewer -l dist/mistake-backend.exe | grep sqlite
 ```
 
-## 验证套路（都验证过好用）
+---
+
+## 验证套路
 
 - **后端**：起临时 `USER_DATA` 的子进程 + urllib 打断言，跑完 terminate。
 - **界面**：无头 Electron `loadFile` 真实 index.html，`executeJavaScript` 取 DOM 断言。
-  语言切换就是这么验的（切 en 后断言可见文本零 CJK；语言下拉框的 `中文` 选项要排除，
-  它按惯例保持本族文字）。
-- **i18n 遗漏扫描**：扫 `render.js` 字符串字面量里的 CJK（排除注释）。应剩 8 处，
-  全是协议值与 DB 键（`SUBJECT_COLORS` 三行、两处 `data-type`、
-  `dataset.type` 比较两行、一句 `console.warn`）。多出来的就是漏翻。
-  注意 `/* */` 块注释（PDF 模板里的 CSS 注释）也会被简单的按行扫描算进去，
-  别把那 7 处当漏翻。
-- **动态生成的下拉框不吃 `applyStaticTranslations()`**。推理档位选项是 JS 拼的，
-  切语言时必须在 `changeLanguage()` 里重建（`loadEffortLevels()`），
-  否则切到英文档位名还是中文——这条是测出来的，不是想出来的。
-- **状态提示别塞进会被隐藏的容器**。`#answer-status` 一度放在 `#answer-tools` 里，
-  而空态下工具区是 `hidden`，于是首次「AI 生成中…」根本看不见。
-  测法是从该元素往上逐级找带 `hidden` 的祖先，比查 `offsetParent` 稳
-  （弹窗自己是 flex 布局，offsetParent 会骗人）。
-- **测 CSS 要测行为，别测属性名**。Tailwind 内置 line-clamp 的 computed
-  `display` 是 `flow-root` 不是 `-webkit-box`，按属性断言会误报失败；量
-  `clientHeight`（3 行 20px 行高 → 60px）才是对的。Play CDN 靠
-  MutationObserver 编译，动态插入的元素要等 ~1s 再量。
+- **i18n 遗漏**：扫 `render.js` 字符串里的 CJK（排除注释），应剩 8 处协议值/DB 键。
+- **动态下拉框**不吃 `applyStaticTranslations()`，切语言时必须在 `changeLanguage()` 里重建。
+- **状态提示别塞进会被隐藏的容器**（曾因此让「AI 生成中…」看不见）。
+- **测 CSS 要测行为，别测属性名**：`line-clamp` 的 computed `display` 是 `flow-root`。
 
-**别信"成功"字样，信独立通道。** 上个会话 spec 打印"已附带 sqlite3.dll"而包里没有，
-是 `archive_viewer` 抓到的；三项"已完成"的改动其实从未落盘，是重新打包产物名还是中文
-才暴露的。声明与验证是两件事，报告时把两者分开说。
+**别信"成功"字样，信独立通道。**
 
-## macOS「已损坏」≠ Gatekeeper 拦截
-
-用户装 dmg 报「已损坏，无法打开」，而且**把「允许任何来源」打开也没用**。
-别往 Gatekeeper 方向查——那是两个不同的拦截点：
-
-| 提示 | 原因 | 隐私设置能否放行 |
-|------|------|------------------|
-| 来自身份不明的开发者 | 有签名但非 Apple 认证 | 能（「仍要打开」） |
-| **已损坏，无法打开** | **完全没有签名** | **不能** |
-
-Apple Silicon 上内核直接拒绝加载无签名的 arm64 二进制，压根到不了 Gatekeeper 那一步。
-CI 日志里 `skipped macOS application code signing` + `arch=arm64` 就是这个坑的信号。
-
-解法是 **ad-hoc 签名**（`codesign --sign -`），不需要任何 Apple 证书，
-已实现在 `scripts/afterPack.js`（electron-builder 的 `afterPack` 钩子）。两个要点：
-
-1. **签名顺序必须从内到外**：先签 `Resources/backend/mistake-backend`（PyInstaller
-   产物，走 extraResources 放在非标准位置，`--deep` 不保证覆盖），最后签 `.app` 外壳。
-   反了会破坏外壳封印，签完又失效。
-2. **CI 里要断言 `Signature=adhoc`**，不能只看构建成功。
-   工作流有 `Verify ad-hoc signature` 一步，签名没生效就直接失败——
-   否则又是「声明成功但产物是坏的」，只有用户装的时候才发现。
-
-另外 quarantine 属性也会报同样的「已损坏」，用户侧 `xattr -cr` 清掉，见 BUILD.md。
+---
 
 ## 环境
 
 - Python：`backend/venv/Scripts/python.exe`（conda 基座，3.13）
+- 真实用户数据库：`C:\Users\liuya\AppData\Roaming\wrong-question-notebook\notebook.db`
+  （调试时别查 `backend/data/notebook.db`，那是空库）
 - gh CLI：`"C:\Program Files\GitHub CLI\gh.exe"`（PATH 里可能没有，用全路径）
-- Git 身份是**仓库局部**配置，不要动全局
 - 临时文件放 `$CLAUDE_JOB_DIR/tmp`，别用 `/tmp`
-- **没有菜单栏**：`Ctrl+R` 刷新和 `F12` 开发者工具已随 `Menu.setApplicationMenu(null)`
-  一起禁用，所以不能让用户"打开控制台看报错"。要排查得先临时加回加速器。
-- macOS 的 dmg 用 GitHub Actions 构建（`.github/workflows/build-mac.yml`，
-  手动触发）。electron-builder 在 CI 会隐式发布，`package.json` 里已加
-  `--publish never`，去掉会让构建成功后仍以退出码 1 失败。
+- **没有菜单栏**：`Ctrl+R` 和 `F12` 已随 `Menu.setApplicationMenu(null)` 禁用
+- macOS dmg 用 GitHub Actions 构建（`.github/workflows/build-mac.yml`，手动触发）

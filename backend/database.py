@@ -53,6 +53,8 @@ def init_db() -> None:
     - 阶段二：新增 raw_image_hash（上传去重）与 idx_next_review 索引。
     - 阶段三：新增 is_generated / parent_id（举一反三）与 last_review_date（复习）。
     - 阶段四：新增 answer_latex（题目/答案分离）。
+    - 阶段五：新增 question_type（MC/TF/SAQ/LAQ，导出留白用）、
+      has_diagram（AI 判定含图示，生成答案时附原图）、diagram_path（图示路径）。
     """
     conn = get_connection()
     try:
@@ -88,6 +90,12 @@ def init_db() -> None:
             conn.execute("ALTER TABLE problems ADD COLUMN last_review_date TEXT")
         if "answer_latex" not in existing_cols:
             conn.execute("ALTER TABLE problems ADD COLUMN answer_latex TEXT")
+        if "question_type" not in existing_cols:
+            conn.execute("ALTER TABLE problems ADD COLUMN question_type TEXT DEFAULT 'SAQ'")
+        if "has_diagram" not in existing_cols:
+            conn.execute("ALTER TABLE problems ADD COLUMN has_diagram INTEGER DEFAULT 0")
+        if "diagram_path" not in existing_cols:
+            conn.execute("ALTER TABLE problems ADD COLUMN diagram_path TEXT")
 
         # 复习查询索引（阶段三 GET /api/review/due 会用到）。
         conn.execute(
